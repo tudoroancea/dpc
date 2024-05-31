@@ -909,7 +909,7 @@ class MotionPlanner:
         id_up = np.searchsorted(self.s_ref, s_guess + tolerance)
         local_traj = np.array([self.X_ref[id_low:id_up], self.Y_ref[id_low:id_up]]).T
 
-        # find the closes point to (X,Y) to find one segment extremity
+        # find the closest point to (X,Y) to find one segment extremity
         distances = np.linalg.norm(local_traj - np.array([X, Y]), axis=1)
         id_min = np.argmin(distances)
 
