@@ -172,6 +172,12 @@ def unrolled_discrete_dynamics_pytorch(
 ################################################################################
 
 
+@PODS
+class ControllerStats:
+    runtime: float
+    cost: float
+
+
 class Controller(ABC):
     @abstractmethod
     def control(
@@ -184,7 +190,7 @@ class Controller(ABC):
         Y_ref: FloatArray,
         phi_ref: FloatArray,
         v_ref: FloatArray,
-    ) -> tuple[FloatArray, FloatArray, float]:
+    ) -> tuple[FloatArray, FloatArray, ControllerStats]:
         pass
 
 
@@ -205,14 +211,11 @@ class CostWeights:
 class NMPCController(Controller):
     discrete_dynamics: Function
     solver: Function
-    cost_weigths: CostWeights
+    cost_weights: CostWeights
 
     def __init__(self, cost_weights: CostWeights = CostWeights(), **kwargs):
-        # create discrete dynamics
         self.discrete_dynamics = get_discrete_dynamics()
-
-        # create costs weights
-        self.cost_weigths = cost_weights
+        self.cost_weights = cost_weights
 
         # optimization variables
         X_ref = SX.sym("X_ref", Nf + 1)
@@ -320,7 +323,7 @@ class NMPCController(Controller):
         Y_ref: FloatArray,
         phi_ref: FloatArray,
         v_ref: FloatArray,
-    ) -> tuple[FloatArray, FloatArray, float]:
+    ) -> tuple[FloatArray, FloatArray, ControllerStats]:
         # set initial state
         x0 = np.array([X, Y, phi, v])
         self.lbx[:nx] = x0
@@ -369,7 +372,11 @@ class NMPCController(Controller):
             ic(stats)
             raise ValueError(stats["return_status"])
 
-        return last_prediction_x, last_prediction_u, runtime
+        return (
+            last_prediction_x,
+            last_prediction_u,
+            ControllerStats(runtime=runtime, cost=sol["f"]),
+        )
 
 
 def create_dpc_dataset(
@@ -705,7 +712,7 @@ class DPCController(Controller):
         Y_ref: FloatArray,
         phi_ref: FloatArray,
         v_ref: FloatArray,
-    ) -> tuple[FloatArray, FloatArray, float]:
+    ) -> tuple[FloatArray, FloatArray, ControllerStats]:
         # translate and rotate reference and current poses
         X_ref_0 = copy(X_ref[0])
         Y_ref_0 = copy(Y_ref[0])
@@ -749,7 +756,7 @@ class DPCController(Controller):
             x_pred.append(self.discrete_dynamics(x_pred[-1], u_pred[i]).full().ravel())
         x_pred = np.array(x_pred)
 
-        return x_pred, u_pred, stop - start
+        return x_pred, u_pred, ControllerStats(runtime=stop - start, cost=0.0)
 
 
 ################################################################################
@@ -1288,8 +1295,8 @@ def closed_loop(
     #     small_orange_cones,
     #     "Motion Planner",
     # )
-
-    for i in trange(Nsim):
+    progress_bar = trange(Nsim)
+    for i in progress_bar:
         X = x_current[0]
         Y = x_current[1]
         phi = x_current[2]
@@ -1302,15 +1309,18 @@ def closed_loop(
         all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
         # call controller
         try:
-            x_pred, u_pred, runtime = controller.control(
+            x_pred, u_pred, stats = controller.control(
                 X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
             )
         except ValueError as e:
             print(f"Error in iteration {i}: {e}")
             break
         u_current = u_pred[0]
+        progress_bar.set_description(
+            f"Runtime: {1000*stats.runtime:.2f} ms, cost: {stats.cost:.2f}"
+        )
         # add data to arrays
-        all_runtimes.append(runtime)
+        all_runtimes.append(stats.runtime)
         all_x_pred.append(x_pred.copy())
         all_u_pred.append(u_pred.copy())
         # simulate next state
@@ -1613,21 +1623,21 @@ def visualize_file(filename: str):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    # closed_loop(
-    #     controller=NMPCController(),
-    #     track_name="fsds_competition_1",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_file("closed_loop_data.npz")
+    closed_loop(
+        controller=NMPCController(),
+        track_name="fsds_competition_1",
+        data_file="closed_loop_data.npz",
+    )
+    visualize_file("closed_loop_data.npz")
 
     # create DPC dataset
     # create_dpc_dataset("data/dpc/dataset.csv")
 
     # train DPC
-    DPCController.from_scratch(
-        dataset_filename="data/dpc/dataset.csv",
-        num_epochs=100,
-        lr=1e-1,
-        nhidden=[32, 32],
-        nonlinearity="relu",
-    )
+    # DPCController.from_scratch(
+    #     dataset_filename="data/dpc/dataset.csv",
+    #     num_epochs=100,
+    #     lr=1e-1,
+    #     nhidden=[32, 32],
+    #     nonlinearity="relu",
+    # )
