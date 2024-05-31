@@ -1,7 +1,7 @@
 numpy 
 matplotlib
 scipy
-qpsolvers
+qpsolvers[proxqp]
 casadi
 icecream
 tqdm
