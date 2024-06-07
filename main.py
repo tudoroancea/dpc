@@ -1,3 +1,4 @@
+import os
 import itertools
 import platform
 from abc import ABC, abstractmethod
@@ -232,6 +233,8 @@ class NMPCController(Controller):
         # construct cost function
         cost_function = 0.0
         for i in range(Nf):
+            # stage state costs (since the initial state is fixed, we can't optimize
+            # the cost at stage 0 and can ignore it in the cost function)
             if i > 0:
                 cp = cos(phi_ref[i])
                 sp = sin(phi_ref[i])
@@ -247,6 +250,7 @@ class NMPCController(Controller):
                     + self.cost_weights.q_phi * (phi - phi_ref[i]) ** 2
                     + self.cost_weights.q_v * (v - v_ref[i]) ** 2
                 )
+            # stage control costs
             T = u[i][0]
             delta = u[i][1]
             T_ref = (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2) / C_m0
@@ -255,6 +259,7 @@ class NMPCController(Controller):
                 + self.cost_weights.r_delta * delta**2
             )
 
+        # terminal state costs
         cp = cos(phi_ref[Nf])
         sp = sin(phi_ref[Nf])
         X = x[Nf][0]
@@ -514,14 +519,13 @@ class ControlConstraintScale(nn.Module):
 
 class DPCController(Controller):
     net: nn.Module
-    discrete_dynamics: Function
     fabric: Fabric
 
     def __init__(
         self, nhidden: list[int], nonlinearity: str, weights_file: str | None = None
     ):
-        self.discrete_dynamics = get_discrete_dynamics()
         self.fabric = Fabric()
+        ic(self.fabric.device)
         self.net = self.fabric.setup(
             DPCController.construct_net(
                 nin=(Nf + 2) * nx,
@@ -530,7 +534,13 @@ class DPCController(Controller):
                 nonlinearity=nonlinearity,
             )
         )
-        ic(self.net)
+        if weights_file is not None:
+            assert os.path.exists(weights_file)
+            try:
+                self.net.load_state_dict(torch.load(weights_file, map_location="cpu"))
+            except RuntimeError as e:
+                print("Checkpoint found but not compatible")
+                raise e
 
     @staticmethod
     def construct_net(
@@ -614,21 +624,21 @@ class DPCController(Controller):
         ) / C_m0  # shape (nbatch, Nf)
         errors_by_sample = (
             # stage longitudinal errors
-            cost_weights.q_lon * torch.sum(lon_lat_errs_sq[:, :-1, 0], dim=1)
+            cost_weights.q_lon * torch.sum(lon_lat_errs_sq[:, 1:-1, 0], dim=1)
             # terminal longitudinal errors
             + cost_weights.q_lon_f * lon_lat_errs_sq[:, -1, 0]
             # stage lateral errors
-            + cost_weights.q_lat * torch.sum(lon_lat_errs_sq[:, :-1, 1], dim=1)
+            + cost_weights.q_lat * torch.sum(lon_lat_errs_sq[:, 1:-1, 1], dim=1)
             # terminal lateral errors
             + cost_weights.q_lat_f * lon_lat_errs_sq[:, -1, 1]
             # stage heading errors
             + cost_weights.q_phi
-            * torch.sum(torch.square(x_pred[:, :-1, 2] - x_ref[:, :-1, 2]), dim=1)
+            * torch.sum(torch.square(x_pred[:, 1:-1, 2] - x_ref[:, 1:-1, 2]), dim=1)
             # terminal heading errors
             + cost_weights.q_phi_f * torch.square(x_pred[:, -1, 2] - x_ref[:, -1, 2])
             # stage velocity errors
             + cost_weights.q_v
-            * torch.sum(torch.square(x_pred[:, :-1, 3] - x_ref[:, :-1, 3]), dim=1)
+            * torch.sum(torch.square(x_pred[:, 1:-1, 3] - x_ref[:, 1:-1, 3]), dim=1)
             # terminal velocity errors
             + cost_weights.q_v_f * torch.square(x_pred[:, -1, 3] - x_ref[:, -1, 3])
             # throttle errors
@@ -639,6 +649,11 @@ class DPCController(Controller):
         return torch.mean(errors_by_sample)
 
     def run_model(self, batch: torch.Tensor, cost_weights: CostWeights) -> torch.Tensor:
+        """
+        :param batch: shape (nbatch, nx * (Nf+2)), first nx columns correspond to the current state, the other ones to the reference
+        :param cost_weights:
+        :return: the average loss for the minibatch
+        """
         # extract current and reference states from batch
         nbatch = len(batch)
         x = batch[:, :nx]
@@ -657,11 +672,13 @@ class DPCController(Controller):
         num_epochs: int,
         nhidden: list[int],
         nonlinearity: str,
+        weights_filename: str | None = None,
+        training_state_filename: str | None = None,
         lr: float = 1e-3,
         batch_sizes=(None, None),
         cost_weights: CostWeights = CostWeights(),
     ):
-        controller = cls(nhidden, nonlinearity)
+        controller = cls(nhidden, nonlinearity, weights_filename)
         optimizer = torch.optim.AdamW(controller.net.parameters(), lr=lr)
         optimizer = controller.fabric.setup_optimizers(optimizer)
         _, train_dataloader, val_dataloader = load_dataset(
@@ -669,11 +686,17 @@ class DPCController(Controller):
             train_data_proportion=0.8,
             batch_sizes=batch_sizes,
         )
-        ic(train_dataloader.batch_size, val_dataloader.batch_size)
+        training_state = {"model": controller.net, "optimizer": optimizer, "lr": lr}
+        if training_state_filename is not None:
+            assert os.path.exists(training_state_filename)
+            controller.fabric.load(training_state_filename, training_state)
+
         train_dataloader, val_dataloader = controller.fabric.setup_dataloaders(
             train_dataloader, val_dataloader
         )
         best_val_loss = np.inf
+        train_losses = []
+        val_losses = []
 
         progress_bar = trange(num_epochs)
         for epoch in progress_bar:
@@ -687,6 +710,7 @@ class DPCController(Controller):
                 optimizer.step()
                 total_train_loss += train_loss.item()
             total_train_loss /= len(train_dataloader)
+            train_losses.append(total_train_loss)
 
             # validation step
             controller.net.eval()
@@ -695,16 +719,30 @@ class DPCController(Controller):
                 for batch in val_dataloader:
                     val_loss += controller.run_model(batch, cost_weights).item()
             val_loss /= len(val_dataloader)
+            val_losses.append(val_loss)
+
+            # save weights if the model is better
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                torch.save(controller.net.state_dict(), "best_model.pth")
+                # torch.save(controller.net.state_dict(), "best_model.pth")
+                controller.fabric.save("best.ckpt", training_state)
 
             # logging
             progress_bar.set_description(
-                f"Epoch {epoch}, train loss: {total_train_loss:.4f}, val loss: {val_loss:.4f}, best val loss: {best_val_loss:.4f}"
+                f"Epoch {epoch+1}, train loss: {total_train_loss:.4f}, val loss: {val_loss:.4f}, best val loss: {best_val_loss:.4f}"
             )
 
-        torch.save(controller.net.state_dict(), "final_model.pth")
+        # save final weights
+        # torch.save(controller.net.state_dict(), "final_model.pth")
+        controller.fabric.save("final.ckpt", training_state)
+
+        plt.figure()
+        plt.plot(np.arange(1, num_epochs + 1), train_losses, label="train loss")
+        plt.plot(np.arange(1, num_epochs + 1), val_losses, label="val loss")
+        plt.xlabel("epoch")
+        plt.ylabel("loss")
+        plt.legend()
+        plt.show()
 
     def control(
         self,
@@ -746,7 +784,8 @@ class DPCController(Controller):
                 ),
                 dtype=torch.float32,
                 requires_grad=False,
-            ).to(device=self.net.device),
+                device=self.net.device,
+            ),
             0,
         )
         # forward pass of the net on the data
@@ -1637,12 +1676,15 @@ if __name__ == "__main__":
     # create DPC dataset
     # create_dpc_dataset("data/dpc/dataset.csv")
 
+    # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
+    # Plan 2: 250 epochs with lr=5E-4,
     # train DPC
     DPCController.from_scratch(
         dataset_filename="data/dpc/dataset.csv",
-        num_epochs=50,
-        lr=5e-2,
+        num_epochs=100,
+        lr=1e-4,
         nhidden=[128, 128, 128],
-        # batch_sizes=(10000, 5000),
         nonlinearity="tanh",
+        # weights_filename="data/plan2.pth",
+        training_state_filename="final2.ckpt",
     )
