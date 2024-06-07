@@ -1,3 +1,5 @@
+!data/tracks
+data/dpc/dataset.csv
 c_generated_code
 acados_ocp.json
 *.png
@@ -6,5 +8,5 @@ acados_ocp.json
 *.o
 *.dylib
 *.so
-*.csv
 *.pth
+*.ckpt
