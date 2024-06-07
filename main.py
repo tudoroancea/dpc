@@ -27,7 +27,14 @@ from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import trange
 
+# misc configs
 L.seed_everything(127)
+np.set_printoptions(precision=3, suppress=True, linewidth=200)
+FloatArray = npt.NDArray[np.float64]
+
+################################################################################
+# car and problem parameters
+################################################################################
 
 # car mass and geometry
 m = 230.0  # mass
@@ -37,17 +44,14 @@ C_m0 = 4.950
 C_r0 = 297.030
 C_r1 = 16.665
 C_r2 = 0.6784
-
-Nf = 40
-nx = 4
-nu = 2
-dt = 1 / 20
-
+# actuator limits
 T_max = 500.0
 delta_max = 0.5
-
-np.set_printoptions(precision=3, suppress=True, linewidth=200)
-FloatArray = npt.NDArray[np.float64]
+# general OCP parameters
+Nf = 40  # horizon size
+nx = 4  # state dimension
+nu = 2  # control dimension
+dt = 1 / 20  # sampling time
 
 
 ################################################################################
@@ -558,13 +562,11 @@ class DPCController(Controller):
         }[nonlinearity]
 
         di = {
-            "batchnorm": nn.BatchNorm1d(nin),
+            "batchnorm": nn.BatchNorm1d(nin, affine=False),
             "hidden_layer_0": nn.Linear(nin, nhidden[0], bias=True),
             "nonlinearity_0": nonlinearity_function,
         }
-        nn.init.xavier_uniform_(
-            di["hidden_layer_0"].weight, gain=nn.init.calculate_gain(nonlinearity)
-        )
+        nn.init.kaiming_normal_(di["hidden_layer_0"].weight, nonlinearity=nonlinearity)
         for i in range(1, len(nhidden)):
             di.update(
                 {
@@ -574,9 +576,8 @@ class DPCController(Controller):
                     f"nonlinearity_{i}": nonlinearity_function,
                 }
             )
-            nn.init.xavier_uniform_(
-                di[f"hidden_layer_{i}"].weight,
-                gain=nn.init.calculate_gain(nonlinearity),
+            nn.init.kaiming_normal_(
+                di[f"hidden_layer_{i}"].weight, nonlinearity=nonlinearity
             )
         di.update(
             {
@@ -584,9 +585,7 @@ class DPCController(Controller):
                 "ouput_scaling": ControlConstraintScale(),
             }
         )
-        nn.init.xavier_uniform_(
-            di["output_layer"].weight, gain=nn.init.calculate_gain(nonlinearity)
-        )
+        nn.init.kaiming_normal_(di["output_layer"].weight, nonlinearity=nonlinearity)
 
         return nn.Sequential(OrderedDict(di))
 
@@ -645,7 +644,7 @@ class DPCController(Controller):
             + cost_weights.r_T * torch.sum(torch.square(u_pred[:, :, 0] - T_ref), dim=1)
             # steering errors
             + cost_weights.r_delta * torch.sum(torch.square(u_pred[:, :, 1]), dim=1)
-        )
+        )  # shape (nbatch,)
         return torch.mean(errors_by_sample)
 
     def run_model(self, batch: torch.Tensor, cost_weights: CostWeights) -> torch.Tensor:
@@ -679,8 +678,9 @@ class DPCController(Controller):
         cost_weights: CostWeights = CostWeights(),
     ):
         controller = cls(nhidden, nonlinearity, weights_filename)
-        optimizer = torch.optim.AdamW(controller.net.parameters(), lr=lr)
-        optimizer = controller.fabric.setup_optimizers(optimizer)
+        optimizer = controller.fabric.setup_optimizers(
+            torch.optim.AdamW(controller.net.parameters(), lr=lr)
+        )
         _, train_dataloader, val_dataloader = load_dataset(
             dataset_filename,
             train_data_proportion=0.8,
@@ -1666,12 +1666,12 @@ def visualize_file(filename: str):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    # closed_loop(
-    #     controller=NMPCController(),
-    #     track_name="fsds_competition_1",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_file("closed_loop_data.npz")
+    closed_loop(
+        controller=NMPCController(),
+        track_name="fsds_competition_1",
+        data_file="closed_loop_data.npz",
+    )
+    visualize_file("closed_loop_data.npz")
 
     # create DPC dataset
     # create_dpc_dataset("data/dpc/dataset.csv")
@@ -1679,12 +1679,12 @@ if __name__ == "__main__":
     # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
     # Plan 2: 250 epochs with lr=5E-4,
     # train DPC
-    DPCController.from_scratch(
-        dataset_filename="data/dpc/dataset.csv",
-        num_epochs=100,
-        lr=1e-4,
-        nhidden=[128, 128, 128],
-        nonlinearity="tanh",
-        # weights_filename="data/plan2.pth",
-        training_state_filename="final2.ckpt",
-    )
+    # DPCController.from_scratch(
+    #     dataset_filename="data/dpc/dataset.csv",
+    #     num_epochs=100,
+    #     lr=5e-4,
+    #     nhidden=[512, 512],
+    #     nonlinearity="leaky_relu",
+    #     # weights_filename="data/plan2.pth",
+    #     # training_state_filename="data/dpc/training/plan5/final.ckpt",
+    # )
