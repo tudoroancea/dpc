@@ -5,7 +5,7 @@ from copy import copy
 from time import perf_counter
 from typing import OrderedDict
 
-from strongpods import PODS
+import lightning as L
 import matplotlib.axes
 import matplotlib.lines
 import matplotlib.pyplot as plt
@@ -13,18 +13,20 @@ import matplotlib.widgets
 import numpy as np
 import numpy.typing as npt
 import torch
-import lightning as L
-from lightning import Fabric
 import torch.nn as nn
 import torch.nn.functional as F
 from casadi import SX, Function, cos, nlpsol, sin, tanh, vertcat
 from icecream import ic
+from lightning import Fabric
 from qpsolvers import available_solvers, solve_qp
 from scipy.sparse import csc_array
 from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
+from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import trange
+
+L.seed_everything(127)
 
 # car mass and geometry
 m = 230.0  # mass
@@ -510,52 +512,6 @@ class ControlConstraintScale(nn.Module):
         return self.scale * F.tanh(input.reshape(input.shape[0], Nf, nu))
 
 
-def construct_mlp(
-    nin: int,
-    nout: int,
-    nhidden: list[int] = [128, 128, 128],
-    nonlinearity: str = "relu",
-):
-    assert len(nhidden) >= 1
-    nonlinearity_function = {
-        "relu": nn.ReLU(),
-        "leaky_relu": nn.LeakyReLU(),
-        "tanh": nn.Tanh(),
-        "sigmoid": nn.Sigmoid(),
-    }[nonlinearity]
-
-    di = {
-        # "batchnorm": nn.BatchNorm1d(nin),
-        "hidden_layer_0": nn.Linear(nin, nhidden[0], bias=True),
-        "nonlinearity_0": nonlinearity_function,
-    }
-    nn.init.xavier_uniform_(
-        di["hidden_layer_0"].weight, gain=nn.init.calculate_gain(nonlinearity)
-    )
-    for i in range(1, len(nhidden)):
-        di.update(
-            {
-                f"hidden_layer_{i}": nn.Linear(nhidden[i - 1], nhidden[i], bias=True),
-                f"nonlinearity_{i}": nonlinearity_function,
-            }
-        )
-        nn.init.xavier_uniform_(
-            di[f"hidden_layer_{i}"].weight,
-            gain=nn.init.calculate_gain(nonlinearity),
-        )
-    di.update(
-        {
-            "output_layer": nn.Linear(nhidden[-1], nout, bias=True),
-            "ouput_scaling": ControlConstraintScale(),
-        }
-    )
-    nn.init.xavier_uniform_(
-        di["output_layer"].weight, gain=nn.init.calculate_gain(nonlinearity)
-    )
-
-    return nn.Sequential(OrderedDict(di))
-
-
 class DPCController(Controller):
     net: nn.Module
     discrete_dynamics: Function
@@ -567,13 +523,62 @@ class DPCController(Controller):
         self.discrete_dynamics = get_discrete_dynamics()
         self.fabric = Fabric()
         self.net = self.fabric.setup(
-            construct_mlp(
+            DPCController.construct_net(
                 nin=(Nf + 2) * nx,
                 nout=Nf * nu,
                 nhidden=nhidden,
                 nonlinearity=nonlinearity,
             )
         )
+        ic(self.net)
+
+    @staticmethod
+    def construct_net(
+        nin: int,
+        nout: int,
+        nhidden: list[int] = [128, 128, 128],
+        nonlinearity: str = "relu",
+    ):
+        assert len(nhidden) >= 1
+        nonlinearity_function = {
+            "relu": nn.ReLU(),
+            "leaky_relu": nn.LeakyReLU(),
+            "tanh": nn.Tanh(),
+            "sigmoid": nn.Sigmoid(),
+        }[nonlinearity]
+
+        di = {
+            "batchnorm": nn.BatchNorm1d(nin),
+            "hidden_layer_0": nn.Linear(nin, nhidden[0], bias=True),
+            "nonlinearity_0": nonlinearity_function,
+        }
+        nn.init.xavier_uniform_(
+            di["hidden_layer_0"].weight, gain=nn.init.calculate_gain(nonlinearity)
+        )
+        for i in range(1, len(nhidden)):
+            di.update(
+                {
+                    f"hidden_layer_{i}": nn.Linear(
+                        nhidden[i - 1], nhidden[i], bias=True
+                    ),
+                    f"nonlinearity_{i}": nonlinearity_function,
+                }
+            )
+            nn.init.xavier_uniform_(
+                di[f"hidden_layer_{i}"].weight,
+                gain=nn.init.calculate_gain(nonlinearity),
+            )
+        di.update(
+            {
+                "output_layer": nn.Linear(nhidden[-1], nout, bias=True),
+                "ouput_scaling": ControlConstraintScale(),
+            }
+        )
+        nn.init.xavier_uniform_(
+            di["output_layer"].weight, gain=nn.init.calculate_gain(nonlinearity)
+        )
+
+        return nn.Sequential(OrderedDict(di))
 
     @staticmethod
     def compute_mpc_loss(
@@ -582,14 +587,17 @@ class DPCController(Controller):
         u_pred: torch.Tensor,
         cost_weights: CostWeights,
     ) -> torch.Tensor:
+        """
+        :param x_ref: shape (nbatch, Nf+1, nx)
+        :param x_pred: shape (nbatch, Nf+1, nx)
+        :param u_pred: shape (nbatch, Nf, nx)
+        """
+        phi_ref = x_ref[:, :, 2]
+        v_ref = x_ref[:, :, 3]
         Rot = torch.stack(
             (
-                torch.stack(
-                    (torch.cos(x_ref[:, :, 2]), -torch.sin(x_ref[:, :, 2])), dim=2
-                ),
-                torch.stack(
-                    (torch.sin(x_ref[:, :, 2]), torch.cos(x_ref[:, :, 2])), dim=2
-                ),
+                torch.stack((torch.cos(phi_ref), -torch.sin(phi_ref)), dim=2),
+                torch.stack((torch.sin(phi_ref), torch.cos(phi_ref)), dim=2),
             ),
             dim=3,
         )  # shape (nbatch, Nf+1, 2, 2)
@@ -601,12 +609,9 @@ class DPCController(Controller):
                 )
             )
         )  # shape (nbatch, Nf+1, 2)
-        v_ref_0toNfminus1 = x_ref[:, :-1, 3]
         T_ref = (
-            C_r0
-            + C_r1 * v_ref_0toNfminus1
-            + C_r2 * v_ref_0toNfminus1 * v_ref_0toNfminus1
-        ) / C_m0
+            C_r0 + C_r1 * v_ref[:, :-1] + C_r2 * v_ref[:, :-1] * v_ref[:, :-1]
+        ) / C_m0  # shape (nbatch, Nf)
         errors_by_sample = (
             # stage longitudinal errors
             cost_weights.q_lon * torch.sum(lon_lat_errs_sq[:, :-1, 0], dim=1)
@@ -653,19 +658,18 @@ class DPCController(Controller):
         nhidden: list[int],
         nonlinearity: str,
         lr: float = 1e-3,
+        batch_sizes=(None, None),
         cost_weights: CostWeights = CostWeights(),
     ):
-        # input: dataset file, controller tuning, net config (number and dimensions of layers)
-        # load dataset and create dataloaders for train and validation dataset
-        # logger setup
-        # training loop with checkpointing
-        # save weights to file
         controller = cls(nhidden, nonlinearity)
         optimizer = torch.optim.AdamW(controller.net.parameters(), lr=lr)
         optimizer = controller.fabric.setup_optimizers(optimizer)
-        dataset, train_dataloader, val_dataloader = load_dataset(
-            dataset_filename, train_data_proportion=0.8, batch_sizes=(None, None)
+        _, train_dataloader, val_dataloader = load_dataset(
+            dataset_filename,
+            train_data_proportion=0.8,
+            batch_sizes=batch_sizes,
         )
+        ic(train_dataloader.batch_size, val_dataloader.batch_size)
         train_dataloader, val_dataloader = controller.fabric.setup_dataloaders(
             train_dataloader, val_dataloader
         )
@@ -1623,21 +1627,22 @@ def visualize_file(filename: str):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    closed_loop(
-        controller=NMPCController(),
-        track_name="fsds_competition_1",
-        data_file="closed_loop_data.npz",
-    )
-    visualize_file("closed_loop_data.npz")
+    # closed_loop(
+    #     controller=NMPCController(),
+    #     track_name="fsds_competition_1",
+    #     data_file="closed_loop_data.npz",
+    # )
+    # visualize_file("closed_loop_data.npz")
 
     # create DPC dataset
     # create_dpc_dataset("data/dpc/dataset.csv")
 
     # train DPC
-    # DPCController.from_scratch(
-    #     dataset_filename="data/dpc/dataset.csv",
-    #     num_epochs=100,
-    #     lr=1e-1,
-    #     nhidden=[32, 32],
-    #     nonlinearity="relu",
-    # )
+    DPCController.from_scratch(
+        dataset_filename="data/dpc/dataset.csv",
+        num_epochs=50,
+        lr=5e-2,
+        nhidden=[128, 128, 128],
+        # batch_sizes=(10000, 5000),
+        nonlinearity="tanh",
+    )
