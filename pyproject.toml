@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dpc"
+dynamic = ["version"]
+dependencies = [
+  "numpy",
+  "matplotlib",
+  "scipy",
+  "qpsolvers[proxqp]",
+  "casadi",
+  "icecream",
+  "tqdm",
+  "torch",
+  "lightning",
+  "strongpods@git+https://github.com/tudoroancea/strongpods.git@v2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff"
+]
+linux = [
+  "PyQt5"
+]
+
+[tool.pyright]
+typeCheckingMode = "off"
+venv = ".venv"
+venvPath = "."

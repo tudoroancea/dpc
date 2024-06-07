@@ -10,3 +10,5 @@ acados_ocp.json
 *.so
 *.pth
 *.ckpt
+*.egg
+*.egg-info
