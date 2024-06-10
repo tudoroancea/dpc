@@ -9,7 +9,7 @@ dependencies = [
   "numpy",
   "matplotlib",
   "scipy",
-  "qpsolvers[proxqp]",
+  "qpsolvers[osqp]",
   "casadi",
   "icecream",
   "tqdm",

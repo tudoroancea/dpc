@@ -540,11 +540,7 @@ class DPCController(Controller):
         )
         if weights_file is not None:
             assert os.path.exists(weights_file)
-            try:
-                self.net.load_state_dict(torch.load(weights_file, map_location="cpu"))
-            except RuntimeError as e:
-                print("Checkpoint found but not compatible")
-                raise e
+            self.fabric.load(weights_file, {"model": self.net})
 
     @staticmethod
     def construct_net(
@@ -812,7 +808,6 @@ NUMBER_SPLINE_INTERVALS = 500
 def fit_spline(
     path: FloatArray,
     curv_weight: float = 1.0,
-    qp_solver: str = "proxqp",
 ) -> tuple[FloatArray, FloatArray]:
     """
     computes the coefficients of each spline portion of the path.
@@ -829,9 +824,6 @@ def fit_spline(
     assert (
         len(path.shape) == 2 and path.shape[1] == 2
     ), f"path must have shape (N,2) but has shape {path.shape}"
-    assert (
-        qp_solver in available_solvers
-    ), f"qp_solver must be one of the available solvers: {available_solvers}"
 
     # precompute all the QP data
     N = path.shape[0]
@@ -884,15 +876,9 @@ def fit_spline(
     q = -B.T @ path
     b = np.zeros(3 * N)
 
-    if qp_solver in {"quadprog", "ecos"}:
-        A = A.toarray()
-        B = B.toarray()
-        C = C.toarray()
-        P = P.toarray()
-
     # solve the QP for X and Y separately
-    p_X = solve_qp(P=P, q=q[:, 0], A=A, b=b, solver=qp_solver)
-    p_Y = solve_qp(P=P, q=q[:, 1], A=A, b=b, solver=qp_solver)
+    p_X = solve_qp(P=P, q=q[:, 0], A=A, b=b, solver="osqp")
+    p_Y = solve_qp(P=P, q=q[:, 1], A=A, b=b, solver="osqp")
     if p_X is None or p_Y is None:
         raise ValueError("solving qp failed")
 
@@ -1080,9 +1066,7 @@ class MotionPlanner:
         n_samples: int = NUMBER_SPLINE_INTERVALS,
         v_ref=5.0,
     ):
-        coeffs_X, coeffs_Y = fit_spline(
-            path=center_line, curv_weight=2.0, qp_solver="proxqp"
-        )
+        coeffs_X, coeffs_Y = fit_spline(path=center_line, curv_weight=2.0)
         delta_s = compute_spline_interval_lengths(coeffs_X=coeffs_X, coeffs_Y=coeffs_Y)
         X_ref, Y_ref, idx_interp, t_interp, s_ref = uniformly_sample_spline(
             coeffs_X=coeffs_X,
@@ -1666,12 +1650,12 @@ def visualize_file(filename: str):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    closed_loop(
-        controller=NMPCController(),
-        track_name="fsds_competition_1",
-        data_file="closed_loop_data.npz",
-    )
-    visualize_file("closed_loop_data.npz")
+    # closed_loop(
+    #     controller=NMPCController(),
+    #     track_name="fsds_competition_1",
+    #     data_file="closed_loop_data.npz",
+    # )
+    # visualize_file("closed_loop_data.npz")
 
     # create DPC dataset
     # create_dpc_dataset("data/dpc/dataset.csv")
@@ -1679,12 +1663,22 @@ if __name__ == "__main__":
     # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
     # Plan 2: 250 epochs with lr=5E-4,
     # train DPC
-    # DPCController.from_scratch(
-    #     dataset_filename="data/dpc/dataset.csv",
-    #     num_epochs=100,
-    #     lr=5e-4,
-    #     nhidden=[512, 512],
-    #     nonlinearity="leaky_relu",
-    #     # weights_filename="data/plan2.pth",
-    #     # training_state_filename="data/dpc/training/plan5/final.ckpt",
+    DPCController.from_scratch(
+        dataset_filename="data/dpc/dataset.csv",
+        num_epochs=100,
+        lr=5e-4,
+        nhidden=[512, 512],
+        nonlinearity="leaky_relu",
+        # weights_filename="data/plan2.pth",
+        # training_state_filename="data/dpc/training/plan5/final.ckpt",
+    )
+
+    # run closed loop experiment with DPC controller
+    # closed_loop(
+    #     controller=DPCController(
+    #         nhidden=[512, 512], nonlinearity="leaky_relu", weights_file="final.ckpt"
+    #     ),
+    #     track_name="fsds_competition_1",
+    #     data_file="closed_loop_data.npz",
     # )
+    # visualize_file("closed_loop_data.npz")
