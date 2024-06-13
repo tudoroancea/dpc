@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from casadi import SX, Function, cos, nlpsol, sin, tanh, vertcat
 from icecream import ic
 from lightning import Fabric
-from qpsolvers import available_solvers, solve_qp
+from qpsolvers import solve_qp
 from scipy.sparse import csc_array
 from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
@@ -396,137 +396,6 @@ class NMPCController(Controller):
         )
 
 
-def create_dpc_dataset(
-    filename: str, max_curvature=1 / 6, n_trajs=31, n_lat=11, n_phi=11, n_v=21
-) -> None:
-    # sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
-    # then create different initial conditions by perturbing e_lat, e_lon, e_phi, e_v. Vary the bounds on e_phi in function of the curvature -> 10^4 values
-    # -> 10^6 samples, each of size nx x (Nf+1) = 4 x 41 = 84 -> ~85MB
-    curvatures = np.linspace(-max_curvature, max_curvature, n_trajs)
-    v_ref = 5.0
-    s = v_ref * dt * np.arange(Nf + 1)
-    reference_trajectories = []
-    reference_headings = []
-    plt.figure()
-    for curvature in curvatures:
-        if np.abs(curvature) < 1e-3:
-            reference_trajectory = np.column_stack((s, np.zeros_like(s)))
-            reference_heading = np.zeros_like(s)
-        else:
-            curvature_radius = np.abs(1 / curvature)
-            angles = s / curvature_radius - np.pi / 2
-            reference_trajectory = curvature_radius * np.column_stack(
-                [np.cos(angles), np.sin(angles)]
-            )
-            reference_heading = angles
-            reference_trajectory[:, 1] += curvature_radius
-            reference_trajectory[:, 1] *= np.sign(curvature)
-
-        plt.plot(reference_trajectory[:, 0], reference_trajectory[:, 1])
-        reference_trajectories.append(reference_trajectory)
-        reference_headings.append(reference_heading)
-
-    plt.axis("equal")
-    plt.show()
-
-    # now associated perturbed initial state
-    lateral_errors = np.linspace(-0.5, 0.5, n_lat)
-    heading_errors = np.linspace(-0.5, 0.5, n_phi)
-    vel_errors = np.linspace(-5.0, 5.0, n_v)
-
-    df = []
-    for (traj, phi_ref), Y, phi, vel_err in itertools.product(
-        zip(reference_trajectories, reference_headings),
-        lateral_errors,
-        heading_errors,
-        vel_errors,
-    ):
-        X = 0.0
-        v = v_ref + vel_err
-        X_ref = traj[:, 0]
-        Y_ref = traj[:, 1]
-        # ic(X,Y,phi,v, v_ref, vel_err)
-        df.append(
-            np.concatenate(
-                (
-                    np.array([X, Y, phi, v]),
-                    np.reshape(
-                        np.column_stack(
-                            (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(s))
-                        ),
-                        nx * (Nf + 1),
-                    ),
-                )
-            )
-        )
-    df = np.array(df)
-
-    np.savetxt(
-        filename,
-        df,
-        fmt="%.5f",
-        delimiter=",",
-        comments="",
-        header="X,Y,phi,v,"
-        + ",".join(
-            [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
-        ),
-    )
-
-
-class DPCDataset(Dataset):
-    data: torch.Tensor
-
-    def __init__(self, filename: str):
-        super().__init__()
-        data_np = np.loadtxt(filename, delimiter=",", skiprows=1)
-        # convert it to torch tensors
-        self.data = torch.tensor(data_np, dtype=torch.float32)
-
-    def __len__(self) -> int:
-        return self.data.shape[0]
-
-    def __getitem__(self, idx: int) -> torch.Tensor:
-        return self.data[idx]
-
-
-def load_dataset(
-    filename: str,
-    train_data_proportion: float = 0.8,
-    batch_sizes: tuple[int | None, int | None] = (None, None),
-) -> tuple[DPCDataset, DataLoader, DataLoader]:
-    # load the dataset
-    dataset = DPCDataset(filename)
-    # split everything into train and validation sets
-    train_data_size = int(len(dataset) * train_data_proportion)
-    train_data, val_data = random_split(
-        dataset, (train_data_size, len(dataset) - train_data_size)
-    )
-    # create dataloaders
-    return (
-        dataset,
-        DataLoader(
-            train_data,
-            batch_size=train_data_size if batch_sizes[0] is None else batch_sizes[0],
-            shuffle=True,
-        ),
-        DataLoader(
-            val_data,
-            batch_size=len(val_data) if batch_sizes[1] is None else batch_sizes[1],
-            shuffle=True,
-        ),
-    )
-
-
-class ControlConstraintScale(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.scale = nn.Parameter(torch.tensor([T_max, delta_max]), requires_grad=False)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        return self.scale * F.tanh(input.reshape(input.shape[0], Nf, nu))
-
-
 class DPCController(Controller):
     net: nn.Module
     fabric: Fabric
@@ -537,12 +406,13 @@ class DPCController(Controller):
         nonlinearity: str,
         weights_file: str | None = None,
         cost_weights: CostWeights = CostWeights(),
+        accelerator: str = "mps",
     ):
         super().__init__(cost_weights)
-        self.fabric = Fabric()
+        self.fabric = Fabric(accelerator=accelerator)
         ic(self.fabric.device)
         self.net = self.fabric.setup(
-            DPCController.construct_net(
+            DPCController._construct_net(
                 nin=(Nf + 2) * nx,
                 nout=Nf * nu,
                 nhidden=nhidden,
@@ -554,12 +424,134 @@ class DPCController(Controller):
             self.fabric.load(weights_file, {"model": self.net})
 
     @staticmethod
-    def construct_net(
+    def create_dpc_dataset(
+        filename: str, max_curvature=1 / 6, n_trajs=31, n_lat=11, n_phi=11, n_v=21
+    ) -> None:
+        # sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
+        # then create different initial conditions by perturbing e_lat, e_lon, e_phi, e_v. Vary the bounds on e_phi in function of the curvature -> 10^4 values
+        # -> 10^6 samples, each of size nx x (Nf+1) = 4 x 41 = 84 -> ~85MB
+        curvatures = np.linspace(-max_curvature, max_curvature, n_trajs)
+        v_ref = 5.0
+        s = v_ref * dt * np.arange(Nf + 1)
+        reference_trajectories = []
+        reference_headings = []
+        plt.figure()
+        for curvature in curvatures:
+            if np.abs(curvature) < 1e-3:
+                reference_trajectory = np.column_stack((s, np.zeros_like(s)))
+                reference_heading = np.zeros_like(s)
+            else:
+                curvature_radius = np.abs(1 / curvature)
+                angles = s / curvature_radius - np.pi / 2
+                reference_trajectory = curvature_radius * np.column_stack(
+                    [np.cos(angles), np.sin(angles)]
+                )
+                reference_heading = angles
+                reference_trajectory[:, 1] += curvature_radius
+                reference_trajectory[:, 1] *= np.sign(curvature)
+
+            plt.plot(reference_trajectory[:, 0], reference_trajectory[:, 1])
+            reference_trajectories.append(reference_trajectory)
+            reference_headings.append(reference_heading)
+
+        plt.axis("equal")
+        plt.show()
+
+        # now associated perturbed initial state
+        lateral_errors = np.linspace(-0.5, 0.5, n_lat)
+        heading_errors = np.linspace(-0.5, 0.5, n_phi)
+        vel_errors = np.linspace(-5.0, 5.0, n_v)
+
+        df = []
+        for (traj, phi_ref), Y, phi, vel_err in itertools.product(
+            zip(reference_trajectories, reference_headings),
+            lateral_errors,
+            heading_errors,
+            vel_errors,
+        ):
+            X = 0.0
+            v = v_ref + vel_err
+            X_ref = traj[:, 0]
+            Y_ref = traj[:, 1]
+            df.append(
+                np.concatenate(
+                    (
+                        np.array([X, Y, phi, v]),
+                        np.reshape(
+                            np.column_stack(
+                                (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(s))
+                            ),
+                            nx * (Nf + 1),
+                        ),
+                    )
+                )
+            )
+        df = np.array(df)
+
+        np.savetxt(
+            filename,
+            df,
+            fmt="%.5f",
+            delimiter=",",
+            comments="",
+            header="X,Y,phi,v,"
+            + ",".join(
+                [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
+            ),
+        )
+
+    class DPCDataset(Dataset):
+        data: torch.Tensor
+
+        def __init__(self, filename: str):
+            super().__init__()
+            data_np = np.loadtxt(filename, delimiter=",", skiprows=1)
+            # convert it to torch tensors
+            self.data = torch.tensor(data_np, dtype=torch.float32)
+
+        def __len__(self) -> int:
+            return self.data.shape[0]
+
+        def __getitem__(self, idx: int) -> torch.Tensor:
+            return self.data[idx]
+
+    @staticmethod
+    def _load_data(
+        filename: str,
+        train_data_proportion: float = 0.8,
+        batch_sizes: tuple[int | None, int | None] = (None, None),
+    ) -> tuple[DPCDataset, DataLoader, DataLoader]:
+        # load the dataset
+        dataset = DPCController.DPCDataset(filename)
+        # split everything into train and validation sets
+        train_data_size = int(len(dataset) * train_data_proportion)
+        train_data, val_data = random_split(
+            dataset, (train_data_size, len(dataset) - train_data_size)
+        )
+        # create dataloaders
+        return (
+            dataset,
+            DataLoader(
+                train_data,
+                batch_size=train_data_size
+                if batch_sizes[0] is None
+                else batch_sizes[0],
+                shuffle=True,
+            ),
+            DataLoader(
+                val_data,
+                batch_size=len(val_data) if batch_sizes[1] is None else batch_sizes[1],
+                shuffle=True,
+            ),
+        )
+
+    @staticmethod
+    def _construct_net(
         nin: int,
         nout: int,
         nhidden: list[int] = [128, 128, 128],
         nonlinearity: str = "relu",
-    ):
+    ) -> nn.Module:
         assert len(nhidden) >= 1
         nonlinearity_function = {
             "relu": nn.ReLU(),
@@ -586,6 +578,19 @@ class DPCController(Controller):
             nn.init.kaiming_normal_(
                 di[f"hidden_layer_{i}"].weight, nonlinearity=nonlinearity
             )
+
+        class ControlConstraintScale(nn.Module):
+            def __init__(self):
+                super().__init__()
+                # we have to define the scale as a Parameter in order to be able to set the
+                # appropriate device for the nn.Module that will contain this Module
+                self.scale = nn.Parameter(
+                    torch.tensor([T_max, delta_max]), requires_grad=False
+                )
+
+            def forward(self, input: torch.Tensor) -> torch.Tensor:
+                return self.scale * F.tanh(input.reshape(input.shape[0], Nf, nu))
+
         di.update(
             {
                 "output_layer": nn.Linear(nhidden[-1], nout, bias=True),
@@ -595,7 +600,6 @@ class DPCController(Controller):
         nn.init.kaiming_normal_(di["output_layer"].weight, nonlinearity=nonlinearity)
 
         return nn.Sequential(OrderedDict(di))
-
 
     def compute_mpc_loss(
         self,
@@ -623,7 +627,7 @@ class DPCController(Controller):
                     Rot,
                     torch.unsqueeze(x_pred[:, :, :2] - x_ref[:, :, :2], dim=3),
                 ),
-                dim=3
+                dim=3,
             )
         )  # shape (nbatch, Nf+1, 2)
         T_ref = (
@@ -642,16 +646,19 @@ class DPCController(Controller):
             + self.cost_weights.q_phi
             * torch.sum(torch.square(x_pred[:, 1:-1, 2] - x_ref[:, 1:-1, 2]), dim=1)
             # terminal heading errors
-            + self.cost_weights.q_phi_f * torch.square(x_pred[:, -1, 2] - x_ref[:, -1, 2])
+            + self.cost_weights.q_phi_f
+            * torch.square(x_pred[:, -1, 2] - x_ref[:, -1, 2])
             # stage velocity errors
             + self.cost_weights.q_v
             * torch.sum(torch.square(x_pred[:, 1:-1, 3] - x_ref[:, 1:-1, 3]), dim=1)
             # terminal velocity errors
             + self.cost_weights.q_v_f * torch.square(x_pred[:, -1, 3] - x_ref[:, -1, 3])
             # throttle errors
-            + self.cost_weights.r_T * torch.sum(torch.square(u_pred[:, :, 0] - T_ref), dim=1)
+            + self.cost_weights.r_T
+            * torch.sum(torch.square(u_pred[:, :, 0] - T_ref), dim=1)
             # steering errors
-            + self.cost_weights.r_delta * torch.sum(torch.square(u_pred[:, :, 1]), dim=1)
+            + self.cost_weights.r_delta
+            * torch.sum(torch.square(u_pred[:, :, 1]), dim=1)
         )  # shape (nbatch,)
         return torch.mean(errors_by_sample)
 
@@ -672,9 +679,8 @@ class DPCController(Controller):
         # compute MPC cost function
         return self.compute_mpc_loss(x_pred, x_ref, u_pred)
 
-    @classmethod
-    def from_scratch(
-        cls,
+    @staticmethod
+    def train(
         dataset_filename: str,
         num_epochs: int,
         nhidden: list[int],
@@ -682,14 +688,19 @@ class DPCController(Controller):
         weights_filename: str | None = None,
         training_state_filename: str | None = None,
         lr: float = 1e-3,
+        weight_decay: float = 0.01,
         batch_sizes=(None, None),
         cost_weights: CostWeights = CostWeights(),
-    ):
-        controller = cls(nhidden, nonlinearity, weights_filename, cost_weights)
-        optimizer = controller.fabric.setup_optimizers(
-            torch.optim.AdamW(controller.net.parameters(), lr=lr)
+    ) -> None:
+        controller = DPCController(
+            nhidden, nonlinearity, weights_filename, cost_weights
         )
-        _, train_dataloader, val_dataloader = load_dataset(
+        optimizer = controller.fabric.setup_optimizers(
+            torch.optim.AdamW(
+                controller.net.parameters(), lr=lr, weight_decay=weight_decay
+            )
+        )
+        _, train_dataloader, val_dataloader = DPCController._load_data(
             dataset_filename,
             train_data_proportion=0.8,
             batch_sizes=batch_sizes,
@@ -776,7 +787,7 @@ class DPCController(Controller):
                 ]
             ]
         )
-        current_state = np.array([X - X_ref[0], Y - Y_ref[0], phi - phi_ref_0, v])
+        current_state = np.array([X - X_ref_0, Y - Y_ref_0, phi - phi_ref_0, v])
         current_state[:2] = R @ current_state[:2]
         current_state[2] -= phi_ref_0
         ref = np.column_stack((X_ref, Y_ref, phi_ref, v_ref))
@@ -813,12 +824,6 @@ class DPCController(Controller):
         x_pred = x_pred.squeeze(dim=0).cpu().detach().numpy()
         u_pred = u_pred.squeeze(dim=0).cpu().detach().numpy()
         return x_pred, u_pred, ControllerStats(runtime=stop - start, cost=loss)
-
-    def visualize_open_loop_predictions(
-        self, x_ref: torch.Tensor, x_pred: torch.Tensor, u_pred: torch.Tensor
-    ) -> torch.Tensor:
-        torch.reshape(torch.ones((10, 2, 2)), (10, 4))
-        pass
 
 
 ################################################################################
@@ -1520,8 +1525,8 @@ def visualize(
     orange = "#ff9b31"
     blue = "#1f77b4"
     red = "#ff5733"
-    purple = "#7c00c6"
     yellow = "#d5c904"
+    # purple = "#7c00c6"
 
     # initialize axes and lines
     # TODO: add shared x axis for 1d subplots
@@ -1681,15 +1686,16 @@ if __name__ == "__main__":
     # visualize_file("closed_loop_data.npz")
 
     # create DPC dataset
-    # create_dpc_dataset("data/dpc/dataset.csv")
+    # DPCController.create_dpc_dataset("data/dpc/dataset.csv")
 
     # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
     # Plan 2: 250 epochs with lr=5E-4,
     # train DPC
-    DPCController.from_scratch(
+    DPCController.train(
         dataset_filename="data/dpc/dataset.csv",
         num_epochs=100,
         lr=5e-4,
+        weight_decay=0.02,
         nhidden=[512, 512],
         nonlinearity="leaky_relu",
         # weights_filename="data/plan2.pth",
@@ -1700,7 +1706,7 @@ if __name__ == "__main__":
     # closed_loop(
     #     Tsim=1.0,
     #     controller=DPCController(
-    #         nhidden=[512, 512], nonlinearity="leaky_relu", weights_file="final.ckpt"
+    #         nhidden=[512, 512], nonlinearity="leaky_relu", weights_file="final.ckpt", accelerator="cpu"
     #     ),
     #     track_name="fsds_competition_1",
     #     data_file="closed_loop_data.npz",
