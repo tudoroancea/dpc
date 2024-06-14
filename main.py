@@ -7,6 +7,7 @@ from time import perf_counter
 from typing import OrderedDict
 from multiprocessing import Pool, cpu_count, Manager
 from multiprocessing.shared_memory import SharedMemory
+from enum import Enum
 
 import lightning as L
 import matplotlib.axes
@@ -1507,7 +1508,12 @@ def closed_loop(
 ################################################################################
 
 
-def visualize(
+class VizMode(Enum):
+    CLOSED_LOOP = "closed_loop"
+    OPEN_LOOP = "open_loop"
+
+
+def visualize_trajectories(
     x_ref: FloatArray,
     x_pred: FloatArray,
     u_pred: FloatArray,
@@ -1516,7 +1522,8 @@ def visualize(
     blue_cones: FloatArray,
     yellow_cones: FloatArray,
     big_orange_cones: FloatArray,
-    output_file: str = "",
+    viz_mode: VizMode = VizMode.CLOSED_LOOP,
+    image_file: str = "",
     show: bool = True,
 ):
     """
@@ -1661,6 +1668,27 @@ def visualize(
             }
             # set aspect ratio to be equal (because we display a map)
             axes[subplot_name].set_aspect("equal")
+            # if we are drawing open loop predictions, we only scale based on the references
+            if viz_mode == VizMode.OPEN_LOOP:
+                xlim = (
+                    np.min(subplot_info["data"]["ref"][:, :, 0]),
+                    np.max(subplot_info["data"]["ref"][:, :, 0]),
+                )
+                ylim = (
+                    np.min(subplot_info["data"]["ref"][:, :, 1]),
+                    np.max(subplot_info["data"]["ref"][:, :, 1]),
+                )
+                xlim = (
+                    xlim[0] - 0.1 * (xlim[1] - xlim[0]),
+                    xlim[1] + 0.1 * (xlim[1] - xlim[0]),
+                )
+                ylim = (
+                    ylim[0] - 0.1 * (ylim[1] - ylim[0]),
+                    ylim[1] + 0.1 * (ylim[1] - ylim[0]),
+                )
+                axes[subplot_name].set_xlim(xlim)
+                axes[subplot_name].set_ylim(ylim)
+
         else:
             # create axes
             axes[subplot_name] = plt.subplot2grid(
@@ -1700,8 +1728,8 @@ def visualize(
     fig.tight_layout()
 
     # save plot to file
-    if output_file != "":
-        plt.savefig(output_file, dpi=300, bbox_inches="tight")
+    if image_file != "":
+        plt.savefig(image_file, dpi=300, bbox_inches="tight")
 
     # define update function
     def update(it):
@@ -1792,6 +1820,7 @@ def visualize(
                         t_ref, subplot_info["data"]["ref"][it]
                     )
                     all = np.concatenate((all, subplot_info["data"]["ref"][it]))
+
                 # recompute xlim to center on the current time step and prediction
                 new_xlim = (t_ref[0], t_ref[-1])
                 new_ylim = (np.min(all), np.max(all))
@@ -1804,7 +1833,7 @@ def visualize(
                     new_ylim[0] - 0.1 * (new_ylim[1] - new_ylim[0]),
                     new_ylim[1] + 0.1 * (new_ylim[1] - new_ylim[0]),
                 )
-                # set xlim
+                # set lims
                 axes[subplot_name].set_xlim(new_xlim)
                 axes[subplot_name].set_ylim(new_ylim)
 
@@ -1826,9 +1855,9 @@ def visualize(
         plt.show()
 
 
-def visualize_file(data_file: str, image_file: str = "closed_loop_data.png"):
+def visualize_trajectories_from_file(data_file: str, **kwargs):
     data = np.load(data_file)
-    visualize(**data, output_file=image_file, show=True)
+    visualize_trajectories(**data, **kwargs)
 
 
 if __name__ == "__main__":
@@ -1874,9 +1903,13 @@ if __name__ == "__main__":
         weights_filename="best.ckpt",
         dataset_filename="data/dpc/dataset.csv",
         data_file="open_loop_data.npz",
-        batch_sizes=(None, 10),
+        batch_sizes=(None, None),
     )
-    visualize_file(data_file="open_loop_data.npz", image_file="open_loop_data.png")
+    visualize_trajectories_from_file(
+        data_file="open_loop_data.npz",
+        image_file="open_loop_data.png",
+        viz_mode=VizMode.OPEN_LOOP,
+    )
 
     # run closed loop experiment with DPC controller
     # closed_loop(
