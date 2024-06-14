@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from copy import copy
 from time import perf_counter
 from typing import OrderedDict
+from multiprocessing import Pool, cpu_count, Manager
+from multiprocessing.shared_memory import SharedMemory
 
 import lightning as L
 import matplotlib.axes
@@ -25,7 +27,7 @@ from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
 from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
-from tqdm import trange
+from tqdm import trange, tqdm
 
 # misc configs
 L.seed_everything(127)
@@ -217,6 +219,21 @@ class Controller(ABC):
         phi_ref: FloatArray,
         v_ref: FloatArray,
     ) -> tuple[FloatArray, FloatArray, ControllerStats]:
+        """
+        Args:
+            X (float): current X position
+            Y (float): current Y position
+            phi (float): current heading angle
+            v (float): current velocity
+            X_ref (FloatArray): reference X trajectory
+            Y_ref (FloatArray): reference Y trajectory
+            phi_ref (FloatArray): reference heading angle trajectory
+            v_ref (FloatArray): reference velocity trajectory
+        Returns:
+            x_pred (FloatArray): state prediction, shape (Nf+1, nx)
+            u_pred (FloatArray): control prediction, shape (Nf, nu)
+            stats (ControllerStats): controller statistics
+        """
         pass
 
 
@@ -410,7 +427,6 @@ class DPCController(Controller):
     ):
         super().__init__(cost_weights)
         self.fabric = Fabric(accelerator=accelerator)
-        ic(self.fabric.device)
         self.net = self.fabric.setup(
             DPCController._construct_net(
                 nin=(Nf + 2) * nx,
@@ -425,11 +441,17 @@ class DPCController(Controller):
 
     @staticmethod
     def create_dpc_dataset(
-        filename: str, max_curvature=1 / 6, n_trajs=31, n_lat=11, n_phi=11, n_v=21
+        filename: str,
+        max_curvature=1 / 6,
+        n_trajs=31,
+        n_lat=11,
+        n_phi=11,
+        n_v=21,
+        nprocesses: int = -1,
     ) -> None:
         # sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
         # then create different initial conditions by perturbing e_lat, e_lon, e_phi, e_v. Vary the bounds on e_phi in function of the curvature -> 10^4 values
-        # -> 10^6 samples, each of size nx x (Nf+1) = 4 x 41 = 84 -> ~85MB
+        # -> 10^6 samples, each of size nx x (Nf+2) + nu x Nf = 4 x 42 + 2 * 40 = 248 -> ~250MB
         curvatures = np.linspace(-max_curvature, max_curvature, n_trajs)
         v_ref = 5.0
         s = v_ref * dt * np.arange(Nf + 1)
@@ -446,9 +468,10 @@ class DPCController(Controller):
                 reference_trajectory = curvature_radius * np.column_stack(
                     [np.cos(angles), np.sin(angles)]
                 )
-                reference_heading = angles
                 reference_trajectory[:, 1] += curvature_radius
                 reference_trajectory[:, 1] *= np.sign(curvature)
+                reference_heading = angles + np.pi / 2
+                reference_heading *= np.sign(curvature)
 
             plt.plot(reference_trajectory[:, 0], reference_trajectory[:, 1])
             reference_trajectories.append(reference_trajectory)
@@ -462,32 +485,60 @@ class DPCController(Controller):
         heading_errors = np.linspace(-0.5, 0.5, n_phi)
         vel_errors = np.linspace(-5.0, 5.0, n_v)
 
-        df = []
-        for (traj, phi_ref), Y, phi, vel_err in itertools.product(
-            zip(reference_trajectories, reference_headings),
-            lateral_errors,
-            heading_errors,
-            vel_errors,
+        n_samples = n_trajs * n_lat * n_phi * n_v
+        n_features = (Nf + 2) * nx  # + Nf * nu
+        answer = input(
+            f"Generating dataset with {n_samples} samples of {n_features} features ? [y/n] "
+        )
+        if answer != "y":
+            return
+
+        df = np.full((n_samples, n_features), np.nan)
+        # first compute the combinations of initial states and state reference
+        for sample_id, ((traj, phi_ref), Y, phi, vel_err) in enumerate(
+            itertools.product(
+                zip(reference_trajectories, reference_headings),
+                lateral_errors,
+                heading_errors,
+                vel_errors,
+            )
         ):
             X = 0.0
             v = v_ref + vel_err
             X_ref = traj[:, 0]
             Y_ref = traj[:, 1]
-            df.append(
-                np.concatenate(
-                    (
-                        np.array([X, Y, phi, v]),
-                        np.reshape(
-                            np.column_stack(
-                                (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(s))
-                            ),
-                            nx * (Nf + 1),
+            df[sample_id, : nx * (Nf + 2)] = np.concatenate(
+                (
+                    np.array([X, Y, phi, v]),
+                    np.reshape(
+                        np.column_stack(
+                            (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(s))
                         ),
-                    )
+                        nx * (Nf + 1),
+                    ),
                 )
             )
-        df = np.array(df)
-
+        # then go over all the data and compute the output of the NMPCController
+        # (do it in parallel by spawning processes)
+        # if nprocesses == -1:
+        #    nprocesses = os.cpu_count()
+        # # separate the indices into nprocesses chunks
+        # chunk_indices = np.array_split(np.arange(n_samples), nprocesses)
+        # referece_controller = NMPCController()
+        # for i in trange(sample_id):
+        #     x_ref = df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
+        #     _, u_ref, _ = referece_controller.control(
+        #         X=df[i, 0],
+        #         Y=df[i, 1],
+        #         phi=df[i, 2],
+        #         v=df[i, 3],
+        #         X_ref=x_ref[:, 0],
+        #         Y_ref=x_ref[:, 1],
+        #         phi_ref=x_ref[:, 2],
+        #         v_ref=x_ref[:, 3],
+        #     )
+        #     df[i, -nu * Nf :] = u_ref.ravel()
+        #
         np.savetxt(
             filename,
             df,
@@ -498,6 +549,7 @@ class DPCController(Controller):
             + ",".join(
                 [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
             ),
+            # + ",".join([f"T_ref_{i}, delta_ref_{i}" for i in range(Nf)]),
         )
 
     class DPCDataset(Dataset):
@@ -678,6 +730,7 @@ class DPCController(Controller):
         x_pred = unrolled_discrete_dynamics_pytorch(x, u_pred)
         # compute MPC cost function
         return self.compute_mpc_loss(x_pred, x_ref, u_pred)
+        # return self.compute_imitation_loss(u_pred,u_ref)
 
     @staticmethod
     def train(
@@ -696,7 +749,7 @@ class DPCController(Controller):
             nhidden, nonlinearity, weights_filename, cost_weights
         )
         optimizer = controller.fabric.setup_optimizers(
-            torch.optim.AdamW(
+            torch.optim.Adam(
                 controller.net.parameters(), lr=lr, weight_decay=weight_decay
             )
         )
@@ -762,6 +815,51 @@ class DPCController(Controller):
         plt.ylabel("loss")
         plt.legend()
         plt.show()
+
+    @staticmethod
+    def viz(
+        nhidden: list[int],
+        nonlinearity: str,
+        weights_filename: str | None,
+        dataset_filename: str,
+        data_file: str,
+        batch_sizes=(None, None),
+    ):
+        # initialize a controller
+        controller = DPCController(
+            nhidden, nonlinearity, weights_filename, accelerator="mps"
+        )
+        # load the data
+        _, _, val_dataloader = DPCController._load_data(
+            dataset_filename,
+            train_data_proportion=0.8,
+            batch_sizes=batch_sizes,
+        )
+        val_dataloader = controller.fabric.setup_dataloaders(val_dataloader)
+        # run the model on the first batch of the validation set (this way we can choose)
+        controller.net.eval()
+        with torch.no_grad():
+            batch = next(iter(val_dataloader))
+            nbatch = len(batch)
+            x = batch[:, :nx]
+            x_ref = batch[:, nx:].reshape(nbatch, Nf + 1, nx)
+            u_pred = controller.net(batch)
+            x_pred = unrolled_discrete_dynamics_pytorch(x, u_pred)
+        all_x_ref = x_ref.cpu().detach().numpy()
+        all_x_pred = x_pred.cpu().detach().numpy()
+        all_u_pred = u_pred.cpu().detach().numpy()
+        # save the data in the same format as the closed loop run to visualize the open loop predictions
+        np.savez(
+            data_file,
+            x_ref=all_x_ref,
+            x_pred=all_x_pred,
+            u_pred=all_u_pred,
+            runtimes=np.ones(nbatch),
+            center_line=np.full((0, 2), np.nan),
+            blue_cones=np.full((0, 2), np.nan),
+            yellow_cones=np.full((0, 2), np.nan),
+            big_orange_cones=np.full((0, 2), np.nan),
+        )
 
     def control(
         self,
@@ -1325,7 +1423,7 @@ def closed_loop(
     """
     # setup main simulation variables
     Nsim = int(Tsim / dt) + 1
-    v_ref = 5.0
+    v_ref = 11.0
     x_current = np.array([0.0, 0.0, np.pi / 2, 0.0])
     s_guess = 0.0
     all_x_ref = []
@@ -1636,6 +1734,50 @@ def visualize(
                     all_points = np.concatenate(
                         (all_points, subplot_info["data"]["ref"][it])
                     )
+
+                old_xlim = axes[subplot_name].get_xlim()
+                old_ylim = axes[subplot_name].get_ylim()
+                old_aspect_ratio = (old_ylim[1] - old_ylim[0]) / (
+                    old_xlim[1] - old_xlim[0]
+                )
+                # recompute the xlim and ylim based on subplot_info["data"]["ref"][it] and subplot_info["data"]["pred"][it]
+                new_xlim = (all_points[:, 0].min(), all_points[:, 0].max())
+                new_ylim = (all_points[:, 1].min(), all_points[:, 1].max())
+                # post process xlim and ylim to make sure we have some margin
+                new_xlim = (
+                    new_xlim[0] - 0.1 * (new_xlim[1] - new_xlim[0]),
+                    new_xlim[1] + 0.1 * (new_xlim[1] - new_xlim[0]),
+                )
+                new_ylim = (
+                    new_ylim[0] - 0.1 * (new_ylim[1] - new_ylim[0]),
+                    new_ylim[1] + 0.1 * (new_ylim[1] - new_ylim[0]),
+                )
+                # post process xlim and ylim to make sure we keep the same aspect ratio
+                new_aspect_ratio = (new_ylim[1] - new_ylim[0]) / (
+                    new_xlim[1] - new_xlim[0]
+                )
+                if new_aspect_ratio > old_aspect_ratio:
+                    # we need to increase the x range
+                    increase_ratio = new_aspect_ratio / old_aspect_ratio
+                    mean = 0.5 * (new_xlim[0] + new_xlim[1])
+                    diff = new_xlim[1] - new_xlim[0]
+                    new_xlim = (
+                        mean - 0.5 * diff * increase_ratio,
+                        mean + 0.5 * diff * increase_ratio,
+                    )
+                else:
+                    # we need to increase the y range
+                    increase_ratio = old_aspect_ratio / new_aspect_ratio
+                    mean = 0.5 * (new_ylim[0] + new_ylim[1])
+                    diff = new_ylim[1] - new_ylim[0]
+                    new_ylim = (
+                        mean - 0.5 * diff * increase_ratio,
+                        mean + 0.5 * diff * increase_ratio,
+                    )
+
+                # set the lims
+                axes[subplot_name].set_xlim(new_xlim)
+                axes[subplot_name].set_ylim(new_ylim)
             else:
                 lines[subplot_name]["past"].set_data(
                     t_past, subplot_info["data"]["past"][: it + 1]
@@ -1643,15 +1785,28 @@ def visualize(
                 lines[subplot_name]["pred"].set_data(
                     t_pred, subplot_info["data"]["pred"][it]
                 )
+                all = subplot_info["data"]["pred"][it]
                 if "ref" in subplot_info["data"]:
                     # we only plot reference for state variables
                     lines[subplot_name]["ref"].set_data(
                         t_ref, subplot_info["data"]["ref"][it]
                     )
-                # recompute the ax.dataLim
-                axes[subplot_name].relim()
-                # update ax.viewLim using the new dataLim
-                axes[subplot_name].autoscale_view()
+                    all = np.concatenate((all, subplot_info["data"]["ref"][it]))
+                # recompute xlim to center on the current time step and prediction
+                new_xlim = (t_ref[0], t_ref[-1])
+                new_ylim = (np.min(all), np.max(all))
+                # add some margin
+                new_xlim = (
+                    new_xlim[0] - 0.1 * (new_xlim[1] - new_xlim[0]),
+                    new_xlim[1] + 0.1 * (new_xlim[1] - new_xlim[0]),
+                )
+                new_ylim = (
+                    new_ylim[0] - 0.1 * (new_ylim[1] - new_ylim[0]),
+                    new_ylim[1] + 0.1 * (new_ylim[1] - new_ylim[0]),
+                )
+                # set xlim
+                axes[subplot_name].set_xlim(new_xlim)
+                axes[subplot_name].set_ylim(new_ylim)
 
     # create slider
     slider_ax = fig.add_axes((0.125, 0.02, 0.775, 0.03))
@@ -1671,44 +1826,68 @@ def visualize(
         plt.show()
 
 
-def visualize_file(filename: str):
-    data = np.load(filename)
-    visualize(**data, output_file="bruh.png", show=True)
+def visualize_file(data_file: str, image_file: str = "closed_loop_data.png"):
+    data = np.load(data_file)
+    visualize(**data, output_file=image_file, show=True)
 
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
     # closed_loop(
     #     controller=NMPCController(),
-    #     track_name="fsds_competition_1",
+    #     track_name="fsds_competition_3",
     #     data_file="closed_loop_data.npz",
     # )
-    # visualize_file("closed_loop_data.npz")
+    # visualize_file(data_file="closed_loop_data.npz", image_file="closed_loop_data.png")
 
     # create DPC dataset
-    # DPCController.create_dpc_dataset("data/dpc/dataset.csv")
+    # DPCController.create_dpc_dataset(
+    #     "data/dpc/dataset.csv",
+    #     n_trajs=31,
+    #     n_lat=11,
+    #     n_phi=11,
+    #     n_v=21,
+    #     # n_trajs=5,
+    #     # n_lat=5,
+    #     # n_phi=5,
+    #     # n_v=5,
+    # )
 
     # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
     # Plan 2: 250 epochs with lr=5E-4,
     # train DPC
-    DPCController.train(
-        dataset_filename="data/dpc/dataset.csv",
-        num_epochs=100,
-        lr=5e-4,
-        weight_decay=0.02,
+    # DPCController.train(
+    #     dataset_filename="data/dpc/dataset.csv",
+    #     num_epochs=100,
+    #     lr=1e-4,
+    #     weight_decay=1.0,
+    #     nhidden=[512, 512],
+    #     nonlinearity="leaky_relu",
+    #     # weights_filename="data/plan2.pth",
+    #     training_state_filename="best.ckpt",
+    # )
+
+    # viz DPC open loop predictions
+    DPCController.viz(
         nhidden=[512, 512],
         nonlinearity="leaky_relu",
-        # weights_filename="data/plan2.pth",
-        # training_state_filename="data/dpc/training/plan5/final.ckpt",
+        weights_filename="best.ckpt",
+        dataset_filename="data/dpc/dataset.csv",
+        data_file="open_loop_data.npz",
+        batch_sizes=(None, 10),
     )
+    visualize_file(data_file="open_loop_data.npz", image_file="open_loop_data.png")
 
     # run closed loop experiment with DPC controller
     # closed_loop(
     #     Tsim=1.0,
     #     controller=DPCController(
-    #         nhidden=[512, 512], nonlinearity="leaky_relu", weights_file="final.ckpt", accelerator="cpu"
+    #         nhidden=[512, 512],
+    #         nonlinearity="leaky_relu",
+    #         weights_file="best.ckpt",
+    #         accelerator="cpu",
     #     ),
     #     track_name="fsds_competition_1",
     #     data_file="closed_loop_data.npz",
     # )
-    # visualize_file("closed_loop_data.npz")
+    # visualize_file(data_file="closed_loop_data.npz", image_file="closed_loop_data.png")
