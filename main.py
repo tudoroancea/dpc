@@ -1,13 +1,13 @@
-import os
 import itertools
+import os
 import platform
 from abc import ABC, abstractmethod
 from copy import copy
+from enum import Enum
+from multiprocessing import Manager, Pool, cpu_count
+from multiprocessing.shared_memory import SharedMemory
 from time import perf_counter
 from typing import OrderedDict
-from multiprocessing import Pool, cpu_count, Manager
-from multiprocessing.shared_memory import SharedMemory
-from enum import Enum
 
 import lightning as L
 import matplotlib.axes
@@ -28,7 +28,7 @@ from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
 from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
-from tqdm import trange, tqdm
+from tqdm import tqdm, trange
 
 # misc configs
 L.seed_everything(127)
@@ -440,9 +440,49 @@ class DPCController(Controller):
             assert os.path.exists(weights_file)
             self.fabric.load(weights_file, {"model": self.net})
 
+    # data utilities ============================================================
     @staticmethod
-    def create_dpc_dataset(
+    def generate_constant_curvature_trajectories(
+        curvatures: FloatArray, v_ref: float = 5.0
+    ) -> FloatArray:
+        """
+        Generate a dataset of trajectories with constant curvature and speed.
+        Args:
+            curvatures (FloatArray): array of curvatures for each trajectory
+            v_ref (float): common reference speed for all trajectories
+        Returns:
+            poses (FloatArray): array of pose trajectories, shape (ntraj, Nf+1, 3)
+        """
+        s = v_ref * dt * np.arange(Nf + 1)[None, :]  # shape (1, Nf+1)
+        poses = np.zeros((len(curvatures), Nf + 1, 3))
+        zero_curvature_idx = np.abs(curvatures) < 1e-3
+        nonzero_curvature_idx = ~zero_curvature_idx
+        # we have a straight trajectory for zero curvature
+        poses[zero_curvature_idx, :, 0] = s
+        #
+        curvature_radius = np.abs(1 / curvatures[nonzero_curvature_idx])[
+            :, None
+        ]  # shape (ncurv, 1)
+        angles = s / curvature_radius - np.pi / 2  # shape (ncurv, Nf+1)
+        reference_X = curvature_radius * np.cos(angles)  # shape (ncurv, Nf+1)
+        poses[nonzero_curvature_idx, :, 0] = reference_X
+        reference_Y = curvature_radius * np.sin(angles)  # shape (ncurv, Nf+1)
+        reference_Y += curvature_radius  # shape (ncurv, Nf+1)
+        reference_Y *= np.sign(
+            curvatures[nonzero_curvature_idx, None]
+        )  # shape (ncurv, Nf+1)
+        poses[nonzero_curvature_idx, :, 1] = reference_Y
+        reference_headings = np.sign(curvatures[nonzero_curvature_idx, None]) * (
+            angles + np.pi / 2
+        )
+        poses[nonzero_curvature_idx, :, 2] = reference_headings  # shape (ncurv, Nf+1)
+
+        return poses
+
+    @staticmethod
+    def create_pretraining_dataset(
         filename: str,
+        v_ref=5.0,
         max_curvature=1 / 6,
         n_trajs=31,
         n_lat=11,
@@ -450,42 +490,23 @@ class DPCController(Controller):
         n_v=21,
         nprocesses: int = -1,
     ) -> None:
-        # sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
-        # then create different initial conditions by perturbing e_lat, e_lon, e_phi, e_v. Vary the bounds on e_phi in function of the curvature -> 10^4 values
-        # -> 10^6 samples, each of size nx x (Nf+2) + nu x Nf = 4 x 42 + 2 * 40 = 248 -> ~250MB
-        curvatures = np.linspace(-max_curvature, max_curvature, n_trajs)
-        v_ref = 5.0
-        s = v_ref * dt * np.arange(Nf + 1)
-        reference_trajectories = []
-        reference_headings = []
+        """
+        sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
+        then create different initial conditions by perturbing e_lat, e_lon, e_phi, e_v. Vary the bounds on e_phi in function of the curvature -> 10^4 values
+        -> 10^6 samples, each of size nx x (Nf+2) + nu x Nf = 4 x 42 + 2 * 40 = 248 -> ~250MB
+        """
+        # compute trajctories with constant curvature
+        trajectories = DPCController.generate_constant_curvature_trajectories(
+            curvatures=np.linspace(-max_curvature, max_curvature, n_trajs), v_ref=v_ref
+        )
+        # plot the trajectories
         plt.figure()
-        for curvature in curvatures:
-            if np.abs(curvature) < 1e-3:
-                reference_trajectory = np.column_stack((s, np.zeros_like(s)))
-                reference_heading = np.zeros_like(s)
-            else:
-                curvature_radius = np.abs(1 / curvature)
-                angles = s / curvature_radius - np.pi / 2
-                reference_trajectory = curvature_radius * np.column_stack(
-                    [np.cos(angles), np.sin(angles)]
-                )
-                reference_trajectory[:, 1] += curvature_radius
-                reference_trajectory[:, 1] *= np.sign(curvature)
-                reference_heading = angles + np.pi / 2
-                reference_heading *= np.sign(curvature)
-
-            plt.plot(reference_trajectory[:, 0], reference_trajectory[:, 1])
-            reference_trajectories.append(reference_trajectory)
-            reference_headings.append(reference_heading)
-
+        for traj in trajectories:
+            plt.plot(traj[:, 0], traj[:, 1])
         plt.axis("equal")
         plt.show()
 
-        # now associated perturbed initial state
-        lateral_errors = np.linspace(-0.5, 0.5, n_lat)
-        heading_errors = np.linspace(-0.5, 0.5, n_phi)
-        vel_errors = np.linspace(-5.0, 5.0, n_v)
-
+        # check in with the user before actually generating the dataset
         n_samples = n_trajs * n_lat * n_phi * n_v
         n_features = (Nf + 2) * nx  # + Nf * nu
         answer = input(
@@ -494,11 +515,16 @@ class DPCController(Controller):
         if answer != "y":
             return
 
+        # generate associated perturbed initial state
+        lateral_errors = np.linspace(-0.5, 0.5, n_lat)
+        heading_errors = np.linspace(-0.5, 0.5, n_phi)
+        vel_errors = np.linspace(-5.0, 5.0, n_v)
+
+        # compute the combinations of initial states and state reference
         df = np.full((n_samples, n_features), np.nan)
-        # first compute the combinations of initial states and state reference
-        for sample_id, ((traj, phi_ref), Y, phi, vel_err) in enumerate(
+        for sample_id, (traj, Y, phi, vel_err) in enumerate(
             itertools.product(
-                zip(reference_trajectories, reference_headings),
+                trajectories,
                 lateral_errors,
                 heading_errors,
                 vel_errors,
@@ -508,12 +534,13 @@ class DPCController(Controller):
             v = v_ref + vel_err
             X_ref = traj[:, 0]
             Y_ref = traj[:, 1]
+            phi_ref = traj[:, 2]
             df[sample_id, : nx * (Nf + 2)] = np.concatenate(
                 (
                     np.array([X, Y, phi, v]),
                     np.reshape(
                         np.column_stack(
-                            (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(s))
+                            (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(X_ref))
                         ),
                         nx * (Nf + 1),
                     ),
@@ -551,6 +578,68 @@ class DPCController(Controller):
                 [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
             ),
             # + ",".join([f"T_ref_{i}, delta_ref_{i}" for i in range(Nf)]),
+        )
+
+    @staticmethod
+    def create_finetuning_dataset(
+        filename: str,
+        n_samples: int,
+        sigma_curvature: float,
+        sigma_lat: float,
+        sigma_phi: float,
+        sigma_v: float,
+        v_ref: float = 5.0,
+    ) -> None:
+        """
+        Here we create the same trajectories but we sample a given number of intial conditions from a multi-variate normal distribution
+        centered around the reference trajectory with a given covariance matrix.
+        Or we also sample the trajectories from a given distribution (on the curvature).
+        """
+        # generate curvatures, lateral errors, heading errors, velocity errors from a multibariate normal distribution
+        # with covariance diagonal(sigma_curvature, sigma_lat, sigma_phi, sigma_v)
+        gen = np.random.randn(n_samples, 4) * np.array(
+            [[sigma_curvature, sigma_lat, sigma_phi, sigma_v]]
+        )
+        alternative_curvatures = (
+            np.random.exponential(scale=2.0, size=n_samples) - v_ref
+        )
+        index_choice = np.random.choice(a=2, p=[0.8, 0.2], size=n_samples)
+        gen[:, 3] = gen[:, 3] * index_choice + alternative_curvatures * (
+            1 - index_choice
+        )
+        # plot the distribution of each value as a separate histogram
+        fig, axs = plt.subplots(2, 2)
+        for i, ax in enumerate(axs.flat):
+            ax.hist(gen[:, i], bins=30)
+            ax.set_title(["curvature", "lateral", "heading", "velocity"][i])
+        plt.tight_layout()
+        plt.show()
+        # generate the trajectories
+        trajectories = DPCController.generate_constant_curvature_trajectories(
+            curvatures=gen[:, 0], v_ref=v_ref
+        )
+        # assemble the dataset
+        df = np.zeros((n_samples, (Nf + 2) * nx))
+        df[:, 1] = gen[:, 1]
+        df[:, 2] = gen[:, 2]
+        df[:, 3] = gen[:, 3] + v_ref
+        df[:, nx:] = np.reshape(
+            np.concatenate(
+                (trajectories, v_ref * np.ones((n_samples, Nf + 1, 1))), axis=2
+            ),
+            (n_samples, nx * (Nf + 1)),
+        )
+        # save the dataset
+        np.savetxt(
+            filename,
+            df,
+            fmt="%.5f",
+            delimiter=",",
+            comments="",
+            header="X,Y,phi,v,"
+            + ",".join(
+                [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
+            ),
         )
 
     class DPCDataset(Dataset):
@@ -883,13 +972,18 @@ class DPCController(Controller):
                 [
                     np.cos(phi_ref_0),
                     np.sin(phi_ref_0),
-                ]
+                ],
+                [
+                    -np.sin(phi_ref_0),
+                    np.cos(phi_ref_0),
+                ],
             ]
         )
         current_state = np.array([X - X_ref_0, Y - Y_ref_0, phi - phi_ref_0, v])
         current_state[:2] = R @ current_state[:2]
-        current_state[2] -= phi_ref_0
-        ref = np.column_stack((X_ref, Y_ref, phi_ref, v_ref))
+        ref = np.column_stack(
+            (X_ref - X_ref_0, Y_ref - Y_ref_0, phi_ref - phi_ref_0, v_ref)
+        )
         ref[:, :2] = ref[:, :2] @ R.T
 
         # assemble inputs into a tensor
@@ -1410,6 +1504,7 @@ def plot_cones(
 def closed_loop(
     controller: Controller,
     Tsim: float = 70.0,
+    v_ref: float = 5.0,
     track_name: str = "fsds_competition_1",
     data_file: str = "closed_loop_data.npz",
 ):
@@ -1424,13 +1519,14 @@ def closed_loop(
     """
     # setup main simulation variables
     Nsim = int(Tsim / dt) + 1
-    v_ref = 11.0
     x_current = np.array([0.0, 0.0, np.pi / 2, 0.0])
+    # x_current = np.array([0.5, 0.0, np.pi / 2 + 0.5, 0.0])
     s_guess = 0.0
     all_x_ref = []
     all_x_pred = []
     all_u_pred = []
     all_runtimes = []
+    all_costs = []
     discrete_dynamics = get_discrete_dynamics_casadi()
 
     # import track data
@@ -1475,6 +1571,7 @@ def closed_loop(
         )
         # add data to arrays
         all_runtimes.append(stats.runtime)
+        all_costs.append(stats.cost)
         all_x_pred.append(x_pred)
         all_u_pred.append(u_pred)
         # simulate next state
@@ -1484,10 +1581,11 @@ def closed_loop(
             print(f"Completed a lap in {i} iterations, i.e. {i * dt} s")
             break
 
-    all_runtimes = np.array(all_runtimes)
     all_x_ref = np.array(all_x_ref)
     all_x_pred = np.array(all_x_pred)
     all_u_pred = np.array(all_u_pred)
+    all_runtimes = np.array(all_runtimes)
+    all_costs = np.array(all_costs)
 
     # save data to npz file
     np.savez(
@@ -1496,6 +1594,7 @@ def closed_loop(
         x_pred=all_x_pred,
         u_pred=all_u_pred,
         runtimes=all_runtimes,
+        costs=all_costs,
         center_line=np.column_stack((motion_planner.X_ref, motion_planner.Y_ref)),
         blue_cones=blue_cones,
         yellow_cones=yellow_cones,
@@ -1518,6 +1617,7 @@ def visualize_trajectories(
     x_pred: FloatArray,
     u_pred: FloatArray,
     runtimes: FloatArray,
+    costs: FloatArray,
     center_line: FloatArray,
     blue_cones: FloatArray,
     yellow_cones: FloatArray,
@@ -1546,6 +1646,14 @@ def visualize_trajectories(
     ax.set_xlabel("runtime [ms]")
     ax.set_yticks([])
     ax.set_title("Runtime distribution")
+
+    # plot cost evolution
+    fig = plt.figure()
+    ax = fig.add_subplot(111)
+    ax.plot(np.arange(len(costs)), costs)
+    ax.set_xlabel("iteration")
+    ax.set_ylabel("cost")
+    ax.set_title("Cost evolution")
 
     # the shapes should be:
     # x_ref : (Nsim, Nf+1, nx)
@@ -1660,10 +1768,18 @@ def visualize_trajectories(
                 # at first we don't display references or predictions (only once we
                 # activate the slider), so we just provide nan array with appropriate shape
                 "ref": axes[subplot_name].plot(
-                    np.full((Nf + 1,), np.nan), np.full((Nf + 1,), np.nan), c="cyan"
+                    np.full((Nf + 1,), np.nan),
+                    np.full((Nf + 1,), np.nan),
+                    c="cyan",
+                    marker="o",
+                    markersize=3,
                 )[0],
                 "pred": axes[subplot_name].plot(
-                    np.full((Nf + 1,), np.nan), np.full((Nf + 1,), np.nan), c=red
+                    np.full((Nf + 1,), np.nan),
+                    np.full((Nf + 1,), np.nan),
+                    c=red,
+                    marker="o",
+                    markersize=3,
                 )[0],
             }
             # set aspect ratio to be equal (because we display a map)
@@ -1862,15 +1978,22 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    # closed_loop(
-    #     controller=NMPCController(),
-    #     track_name="fsds_competition_3",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_file(data_file="closed_loop_data.npz", image_file="closed_loop_data.png")
+    closed_loop(
+        controller=NMPCController(),
+        track_name="fsds_competition_1",
+        data_file="closed_loop_data.npz",
+    )
+    visualize_trajectories_from_file(
+        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    )
 
+    # ic(
+    #     DPCController.generate_constant_curvature_trajectories(
+    #         curvatures=np.linspace(-0.1, 0.1, 5)
+    #     )
+    # )
     # create DPC dataset
-    # DPCController.create_dpc_dataset(
+    # DPCController.create_pretraining_dataset(
     #     "data/dpc/dataset.csv",
     #     n_trajs=31,
     #     n_lat=11,
@@ -1881,46 +2004,57 @@ if __name__ == "__main__":
     #     # n_phi=5,
     #     # n_v=5,
     # )
+    # DPCController.create_finetuning_dataset(
+    #     filename="data/dpc/finetuning/dataset.csv",
+    #     n_samples=40000,
+    #     sigma_curvature=0.05,
+    #     sigma_lat=0.1,
+    #     sigma_phi=0.1,
+    #     sigma_v=0.5,
+    # )
 
-    # Plan 1: 100 epochs with lr=1e-3, 300 epochs with lr=1e-4
-    # Plan 2: 250 epochs with lr=5E-4,
+    net_config = {
+        "nhidden": [512] * 2,
+        "nonlinearity": "tanh",
+    }
+
     # train DPC
     # DPCController.train(
-    #     dataset_filename="data/dpc/dataset.csv",
-    #     num_epochs=100,
+    #     dataset_filename="data/dpc/finetuning/dataset.csv",
+    #     num_epochs=300,
     #     lr=1e-4,
-    #     weight_decay=1.0,
-    #     nhidden=[512, 512],
-    #     nonlinearity="leaky_relu",
+    #     # weight_decay=1.0,
+    #     **net_config,
     #     # weights_filename="data/plan2.pth",
-    #     training_state_filename="best.ckpt",
+    #     # training_state_filename="best.ckpt",
+    #     training_state_filename="data/first_encouraging.ckpt",
     # )
 
     # viz DPC open loop predictions
-    DPCController.viz(
-        nhidden=[512, 512],
-        nonlinearity="leaky_relu",
-        weights_filename="best.ckpt",
-        dataset_filename="data/dpc/dataset.csv",
-        data_file="open_loop_data.npz",
-        batch_sizes=(None, None),
-    )
-    visualize_trajectories_from_file(
-        data_file="open_loop_data.npz",
-        image_file="open_loop_data.png",
-        viz_mode=VizMode.OPEN_LOOP,
-    )
+    # DPCController.viz(
+    #     **net_config,
+    #     weights_filename="best.ckpt",
+    #     dataset_filename="data/dpc/finetuning/dataset.csv",
+    #     data_file="open_loop_data.npz",
+    #     batch_sizes=(None, None),
+    # )
+    # visualize_trajectories_from_file(
+    #     data_file="open_loop_data.npz",
+    #     image_file="open_loop_data.png",
+    #     viz_mode=VizMode.OPEN_LOOP,
+    # )
 
     # run closed loop experiment with DPC controller
     # closed_loop(
-    #     Tsim=1.0,
+    #     Tsim=5.0,
     #     controller=DPCController(
-    #         nhidden=[512, 512],
-    #         nonlinearity="leaky_relu",
+    #         **net_config,
     #         weights_file="best.ckpt",
     #         accelerator="cpu",
     #     ),
     #     track_name="fsds_competition_1",
     #     data_file="closed_loop_data.npz",
     # )
-    # visualize_file(data_file="closed_loop_data.npz", image_file="closed_loop_data.png")
+    # visualize_trajectories_from_file(
+    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    # )

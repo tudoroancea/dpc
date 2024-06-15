@@ -1,5 +1,6 @@
 !data/tracks
-data/dpc/dataset.csv
+data/dpc/finetuning/*csv
+data/dpc/pretraining/*csv
 c_generated_code
 acados_ocp.json
 *.png
@@ -12,3 +13,4 @@ acados_ocp.json
 *.ckpt
 *.egg
 *.egg-info
+.DS_Store
