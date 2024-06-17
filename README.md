@@ -21,3 +21,11 @@ Things that happen at almost every training, no matter the net dimensions, no ma
 2. at some point, the loss starts oscillating a lot, even with `lr=1e-4`
   ![](doc/oscillation.png)
   ![](doc/oscillation_2.png)
+
+
+## dataset format
+
+CSV file with the following format:
+```
+X,Y,phi,v,X_ref_0,Y_ref_0,phi_ref_0,v_ref_0,...,X_ref_40,Y_ref_40,phi_ref_40,v_ref_40,T_mpc_0,delta_mpc_0,...,T_mpc_39,delta_mpc_39,cost_mpc
+```

@@ -186,6 +186,7 @@ def unrolled_discrete_dynamics_pytorch(
 class ControllerStats:
     runtime: float
     cost: float
+    num_iters: int = 0
 
 
 @PODS
@@ -410,7 +411,9 @@ class NMPCController(Controller):
         return (
             last_prediction_x,
             last_prediction_u,
-            ControllerStats(runtime=runtime, cost=sol["f"]),
+            ControllerStats(
+                runtime=runtime, cost=sol["f"], num_iters=stats["iter_count"]
+            ),
         )
 
 
@@ -480,6 +483,47 @@ class DPCController(Controller):
         return poses
 
     @staticmethod
+    def compute_mpc_output(df: np.ndarray) -> np.ndarray:
+        n_samples = df.shape[0]
+        reference_controller = NMPCController()
+        progress_bar = trange(n_samples)
+        for i in progress_bar:
+            x_ref = df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
+            _, u_ref, stats = reference_controller.control(
+                X=df[i, 0],
+                Y=df[i, 1],
+                phi=df[i, 2],
+                v=df[i, 3],
+                X_ref=x_ref[:, 0],
+                Y_ref=x_ref[:, 1],
+                phi_ref=x_ref[:, 2],
+                v_ref=x_ref[:, 3],
+            )
+            df[i, -nu * Nf - 1 : -1] = u_ref.ravel()
+            df[i, -1] = stats.cost
+            progress_bar.set_description(
+                f"num_iters: {stats.num_iters}, cost: {stats.cost}"
+            )
+        return df
+
+    @staticmethod
+    def save_dataset(df: np.ndarray, filename: str):
+        np.savetxt(
+            filename,
+            df,
+            fmt="%.5f",
+            delimiter=",",
+            comments="",
+            header="X,Y,phi,v,"
+            + ",".join(
+                [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
+            )
+            + ","
+            + ",".join([f"T_mpc_{i},delta_mpc_{i}" for i in range(Nf)])
+            + ",cost_mpc",
+        )
+
+    @staticmethod
     def create_pretraining_dataset(
         filename: str,
         v_ref=5.0,
@@ -488,7 +532,6 @@ class DPCController(Controller):
         n_lat=11,
         n_phi=11,
         n_v=21,
-        nprocesses: int = -1,
     ) -> None:
         """
         sample arcs of constant curvatures with constant speeds to create references -> 10x10=100
@@ -508,7 +551,7 @@ class DPCController(Controller):
 
         # check in with the user before actually generating the dataset
         n_samples = n_trajs * n_lat * n_phi * n_v
-        n_features = (Nf + 2) * nx  # + Nf * nu
+        n_features = nx + (Nf + 1) * nx + Nf * nu + 1
         answer = input(
             f"Generating dataset with {n_samples} samples of {n_features} features ? [y/n] "
         )
@@ -522,7 +565,7 @@ class DPCController(Controller):
 
         # compute the combinations of initial states and state reference
         df = np.full((n_samples, n_features), np.nan)
-        for sample_id, (traj, Y, phi, vel_err) in enumerate(
+        for sample_id, (traj, lat_err, heading_err, vel_err) in enumerate(
             itertools.product(
                 trajectories,
                 lateral_errors,
@@ -530,14 +573,14 @@ class DPCController(Controller):
                 vel_errors,
             )
         ):
-            X = 0.0
-            v = v_ref + vel_err
+            # initial conditions
+            df[sample_id, :nx] = np.array([0.0, lat_err, heading_err, v_ref + vel_err])
+            # reference trajectory
             X_ref = traj[:, 0]
             Y_ref = traj[:, 1]
             phi_ref = traj[:, 2]
-            df[sample_id, : nx * (Nf + 2)] = np.concatenate(
+            df[sample_id, nx : nx * (Nf + 2)] = np.concatenate(
                 (
-                    np.array([X, Y, phi, v]),
                     np.reshape(
                         np.column_stack(
                             (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(X_ref))
@@ -546,39 +589,12 @@ class DPCController(Controller):
                     ),
                 )
             )
-        # then go over all the data and compute the output of the NMPCController
-        # (do it in parallel by spawning processes)
-        # if nprocesses == -1:
-        #    nprocesses = os.cpu_count()
-        # # separate the indices into nprocesses chunks
-        # chunk_indices = np.array_split(np.arange(n_samples), nprocesses)
-        # referece_controller = NMPCController()
-        # for i in trange(sample_id):
-        #     x_ref = df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
-        #     _, u_ref, _ = referece_controller.control(
-        #         X=df[i, 0],
-        #         Y=df[i, 1],
-        #         phi=df[i, 2],
-        #         v=df[i, 3],
-        #         X_ref=x_ref[:, 0],
-        #         Y_ref=x_ref[:, 1],
-        #         phi_ref=x_ref[:, 2],
-        #         v_ref=x_ref[:, 3],
-        #     )
-        #     df[i, -nu * Nf :] = u_ref.ravel()
-        #
-        np.savetxt(
-            filename,
-            df,
-            fmt="%.5f",
-            delimiter=",",
-            comments="",
-            header="X,Y,phi,v,"
-            + ",".join(
-                [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
-            ),
-            # + ",".join([f"T_ref_{i}, delta_ref_{i}" for i in range(Nf)]),
-        )
+
+        # go over all the data and compute the output of the NMPCController
+        df = DPCController.compute_mpc_output(df)
+
+        # save data to csv file
+        DPCController.save_dataset(df, filename)
 
     @staticmethod
     def create_finetuning_dataset(
@@ -619,7 +635,7 @@ class DPCController(Controller):
             curvatures=gen[:, 0], v_ref=v_ref
         )
         # assemble the dataset
-        df = np.zeros((n_samples, (Nf + 2) * nx))
+        df = np.zeros((n_samples, nx + (Nf + 1) * nx + Nf * nu + 1))
         df[:, 1] = gen[:, 1]
         df[:, 2] = gen[:, 2]
         df[:, 3] = gen[:, 3] + v_ref
@@ -629,18 +645,12 @@ class DPCController(Controller):
             ),
             (n_samples, nx * (Nf + 1)),
         )
+
+        # compute the output of the NMPCController
+        df = DPCController.compute_mpc_output(df)
+
         # save the dataset
-        np.savetxt(
-            filename,
-            df,
-            fmt="%.5f",
-            delimiter=",",
-            comments="",
-            header="X,Y,phi,v,"
-            + ",".join(
-                [f"X_ref_{i},Y_ref_{i},phi_ref_{i},v_ref_{i}" for i in range(Nf + 1)]
-            ),
-        )
+        DPCController.save_dataset(df, filename)
 
     class DPCDataset(Dataset):
         data: torch.Tensor
@@ -1978,14 +1988,14 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    closed_loop(
-        controller=NMPCController(),
-        track_name="fsds_competition_1",
-        data_file="closed_loop_data.npz",
-    )
-    visualize_trajectories_from_file(
-        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    )
+    # closed_loop(
+    #     controller=NMPCController(),
+    #     track_name="fsds_competition_1",
+    #     data_file="closed_loop_data.npz",
+    # )
+    # visualize_trajectories_from_file(
+    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    # )
 
     # ic(
     #     DPCController.generate_constant_curvature_trajectories(
@@ -1993,17 +2003,17 @@ if __name__ == "__main__":
     #     )
     # )
     # create DPC dataset
-    # DPCController.create_pretraining_dataset(
-    #     "data/dpc/dataset.csv",
-    #     n_trajs=31,
-    #     n_lat=11,
-    #     n_phi=11,
-    #     n_v=21,
-    #     # n_trajs=5,
-    #     # n_lat=5,
-    #     # n_phi=5,
-    #     # n_v=5,
-    # )
+    DPCController.create_pretraining_dataset(
+        "data/dpc/dataset2.csv",
+        # n_trajs=31,
+        # n_lat=11,
+        # n_phi=11,
+        # n_v=21,
+        n_trajs=5,
+        n_lat=5,
+        n_phi=5,
+        n_v=5,
+    )
     # DPCController.create_finetuning_dataset(
     #     filename="data/dpc/finetuning/dataset.csv",
     #     n_samples=40000,
