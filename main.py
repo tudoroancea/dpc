@@ -760,10 +760,16 @@ class DPCController(Controller):
         u_pred: torch.Tensor,
     ) -> torch.Tensor:
         """
+        Computes the loss for the MPC controller for each sample in the batch.
+
         :param x_ref: shape (nbatch, Nf+1, nx)
         :param x_pred: shape (nbatch, Nf+1, nx)
         :param u_pred: shape (nbatch, Nf, nx)
+        :return: the loss for each sample in the batch, shape (nbatch,)
         """
+        nbatch = x_ref.shape[0]
+        assert x_ref.shape == x_pred.shape == (nbatch, Nf + 1, nx)
+        assert u_pred.shape == (nbatch, Nf, nu)
         phi_ref = x_ref[:, :, 2]
         v_ref = x_ref[:, :, 3]
         Rot = torch.stack(
@@ -785,7 +791,7 @@ class DPCController(Controller):
         T_ref = (
             C_r0 + C_r1 * v_ref[:, :-1] + C_r2 * v_ref[:, :-1] * v_ref[:, :-1]
         ) / C_m0  # shape (nbatch, Nf)
-        errors_by_sample = (
+        cost_per_sample = (
             # stage longitudinal errors
             self.cost_weights.q_lon * torch.sum(lon_lat_errs_sq[:, 1:-1, 0], dim=1)
             # terminal longitudinal errors
@@ -812,7 +818,23 @@ class DPCController(Controller):
             + self.cost_weights.r_delta
             * torch.sum(torch.square(u_pred[:, :, 1]), dim=1)
         )  # shape (nbatch,)
-        return torch.mean(errors_by_sample)
+        assert cost_per_sample.shape == (nbatch,)
+        return cost_per_sample
+
+    def compute_dpc_loss(
+        self,
+        x_ref: torch.Tensor,
+        x_pred: torch.Tensor,
+        u_pred: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Basically computes the mean MPC loss on the batch.
+        :param x_ref: shape (nbatch, Nf+1, nx)
+        :param x_pred: shape (nbatch, Nf+1, nx)
+        :param u_pred: shape (nbatch, Nf, nx)
+        :return: the average loss for the minibatch, shape (1,)
+        """
+        return torch.mean(self.compute_mpc_loss(x_ref, x_pred, u_pred))
 
     def run_model(self, batch: torch.Tensor) -> torch.Tensor:
         """
@@ -829,7 +851,7 @@ class DPCController(Controller):
         # run the model to compute the predicted states
         x_pred = unrolled_discrete_dynamics_pytorch(x, u_pred)
         # compute MPC cost function
-        return self.compute_mpc_loss(x_pred, x_ref, u_pred)
+        return self.compute_dpc_loss(x_pred, x_ref, u_pred)
         # return self.compute_imitation_loss(u_pred,u_ref)
 
     @staticmethod
@@ -916,34 +938,27 @@ class DPCController(Controller):
         plt.legend()
         plt.show()
 
-    @staticmethod
-    def viz(
-        nhidden: list[int],
-        nonlinearity: str,
-        weights_filename: str | None,
+    def compute_open_loop_predictions(
+        self,
         dataset_filename: str,
         data_file: str,
         batch_sizes=(None, None),
     ):
-        # initialize a controller
-        controller = DPCController(
-            nhidden, nonlinearity, weights_filename, accelerator="mps"
-        )
         # load the data
         _, _, val_dataloader = DPCController._load_data(
             dataset_filename,
             train_data_proportion=0.8,
             batch_sizes=batch_sizes,
         )
-        val_dataloader = controller.fabric.setup_dataloaders(val_dataloader)
+        val_dataloader = self.fabric.setup_dataloaders(val_dataloader)
         # run the model on the first batch of the validation set (this way we can choose)
-        controller.net.eval()
+        self.net.eval()
         with torch.no_grad():
             batch = next(iter(val_dataloader))
             nbatch = len(batch)
             x = batch[:, :nx]
             x_ref = batch[:, nx:].reshape(nbatch, Nf + 1, nx)
-            u_pred = controller.net(batch)
+            u_pred = self.net(batch)
             x_pred = unrolled_discrete_dynamics_pytorch(x, u_pred)
         all_x_ref = x_ref.cpu().detach().numpy()
         all_x_pred = x_pred.cpu().detach().numpy()
@@ -955,6 +970,7 @@ class DPCController(Controller):
             x_pred=all_x_pred,
             u_pred=all_u_pred,
             runtimes=np.ones(nbatch),
+            costs=np.zeros(nbatch),
             center_line=np.full((0, 2), np.nan),
             blue_cones=np.full((0, 2), np.nan),
             yellow_cones=np.full((0, 2), np.nan),
@@ -1021,7 +1037,7 @@ class DPCController(Controller):
         stop = perf_counter()
         # reformat the output
         x_pred = unrolled_discrete_dynamics_pytorch(x, u_pred)
-        loss = self.compute_mpc_loss(x_pred, x_ref, u_pred).item()
+        loss = self.compute_dpc_loss(x_pred, x_ref, u_pred).item()
 
         # convert tensors to numpy arrays
         x_pred = x_pred.squeeze(dim=0).cpu().detach().numpy()
@@ -2003,17 +2019,17 @@ if __name__ == "__main__":
     #     )
     # )
     # create DPC dataset
-    DPCController.create_pretraining_dataset(
-        "data/dpc/dataset2.csv",
-        # n_trajs=31,
-        # n_lat=11,
-        # n_phi=11,
-        # n_v=21,
-        n_trajs=5,
-        n_lat=5,
-        n_phi=5,
-        n_v=5,
-    )
+    # DPCController.create_pretraining_dataset(
+    #     "data/dpc/dataset2.csv",
+    #     # n_trajs=31,
+    #     # n_lat=11,
+    #     # n_phi=11,
+    #     # n_v=21,
+    #     n_trajs=5,
+    #     n_lat=5,
+    #     n_phi=5,
+    #     n_v=5,
+    # )
     # DPCController.create_finetuning_dataset(
     #     filename="data/dpc/finetuning/dataset.csv",
     #     n_samples=40000,
@@ -2041,18 +2057,19 @@ if __name__ == "__main__":
     # )
 
     # viz DPC open loop predictions
-    # DPCController.viz(
-    #     **net_config,
-    #     weights_filename="best.ckpt",
-    #     dataset_filename="data/dpc/finetuning/dataset.csv",
-    #     data_file="open_loop_data.npz",
-    #     batch_sizes=(None, None),
-    # )
-    # visualize_trajectories_from_file(
-    #     data_file="open_loop_data.npz",
-    #     image_file="open_loop_data.png",
-    #     viz_mode=VizMode.OPEN_LOOP,
-    # )
+    DPCController(
+        **net_config,
+        weights_file="best.ckpt",
+    ).compute_open_loop_predictions(
+        dataset_filename="data/dpc/finetuning/dataset.csv",
+        data_file="open_loop_data.npz",
+        batch_sizes=(None, None),
+    )
+    visualize_trajectories_from_file(
+        data_file="open_loop_data.npz",
+        image_file="open_loop_data.png",
+        viz_mode=VizMode.OPEN_LOOP,
+    )
 
     # run closed loop experiment with DPC controller
     # closed_loop(
