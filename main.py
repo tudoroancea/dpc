@@ -250,14 +250,21 @@ class NMPCController(Controller):
         self.discrete_dynamics = get_discrete_dynamics_casadi()
 
         # optimization variables
+        x = [SX.sym(f"x_{i}", nx) for i in range(Nf + 1)]
+        u = [SX.sym(f"u_{i}", nu) for i in range(Nf)]
+        optimization_variables = []
+        for i in range(Nf):
+            optimization_variables.append(x[i])
+            optimization_variables.append(u[i])
+        optimization_variables.append(x[Nf])
+        optimization_variables = vertcat(*optimization_variables)
+
+        # parameters
         X_ref = SX.sym("X_ref", Nf + 1)
         Y_ref = SX.sym("Y_ref", Nf + 1)
         phi_ref = SX.sym("phi_ref", Nf + 1)
         v_ref = SX.sym("v_ref", Nf + 1)
-        x = [SX.sym(f"x_{i}", nx) for i in range(Nf + 1)]
-        u = [SX.sym(f"u_{i}", nu) for i in range(Nf)]
         parameters = vertcat(X_ref, Y_ref, phi_ref, v_ref)
-        optimization_variables = vertcat(*x, *u)
 
         # construct cost function
         cost_function = 0.0
@@ -314,14 +321,19 @@ class NMPCController(Controller):
         # simple bounds
         self.lbx = np.concatenate(
             (
-                np.tile(np.array([-np.inf, -np.inf, -np.inf, -np.inf]), Nf + 1),
-                np.tile(np.array([-T_max, -delta_max]), Nf),
+                np.tile(
+                    np.array([-np.inf, -np.inf, -np.inf, -np.inf, -T_max, -delta_max]),
+                    Nf,
+                ),
+                np.array([-np.inf, -np.inf, -np.inf, -np.inf]),
             )
         )
         self.ubx = np.concatenate(
             (
-                np.tile(np.array([np.inf, np.inf, np.inf, np.inf]), Nf + 1),
-                np.tile(np.array([T_max, delta_max]), Nf),
+                np.tile(
+                    np.array([np.inf, np.inf, np.inf, np.inf, T_max, delta_max]), Nf
+                ),
+                np.array([np.inf, np.inf, np.inf, np.inf]),
             )
         )
 
@@ -329,6 +341,7 @@ class NMPCController(Controller):
         self.solver = nlpsol(
             "nmpc",
             "ipopt",
+            # "fatrop",
             {
                 "x": optimization_variables,
                 "f": cost_function,
@@ -338,6 +351,11 @@ class NMPCController(Controller):
             {
                 "print_time": 0,
                 "ipopt": {"sb": "yes", "print_level": 0},
+                # "expand": True,
+                # "debug": False,
+                # "structure_detection": "auto",
+                # "equality": np.ones(eq_constraints.shape[0], dtype=bool),
+                # "fatrop": {"print_level": 0},
             }
             | (
                 {}
@@ -366,18 +384,22 @@ class NMPCController(Controller):
         self.ubx[:nx] = x0
 
         # create guess
-        # x = [x0]
-        # u = []
-        # for i in range(Nf):
-        #     u.append(np.array([90.0 * (v_ref[i] - x[-1][3]), 0.0]))
-        #     x.append(self.discrete_dynamics(x[-1], u[-1]).full().ravel())
-        # initial_guess = np.concatenate(x + u)
         initial_guess = np.concatenate(
             (
                 np.reshape(
-                    np.column_stack((X_ref, Y_ref, phi_ref, v_ref)), (Nf + 1) * nx
+                    np.concatenate(
+                        (
+                            X_ref[:Nf, None],
+                            Y_ref[:Nf, None],
+                            phi_ref[:Nf, None],
+                            v_ref[:Nf, None],
+                            np.zeros((Nf, nu)),
+                        ),
+                        axis=1,
+                    ),
+                    Nf * (nx + nu),
                 ),
-                np.zeros(Nf * nu),
+                np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]]),
             )
         )
         # initial_guess = np.zeros((Nf + 1) * nx + Nf * nu)
@@ -398,9 +420,16 @@ class NMPCController(Controller):
 
         # extract solution
         opt_variables = sol["x"].full().ravel()
-        last_prediction_x = opt_variables[: (Nf + 1) * nx].reshape(Nf + 1, nx).copy()
-        last_prediction_u = opt_variables[(Nf + 1) * nx :].reshape(Nf, nu).copy()
-        # last_prediction_x[0, :] = x0
+        last_prediction_x = []
+        last_prediction_u = []
+        for i in range(Nf):
+            last_prediction_x.append(
+                opt_variables[i * (nx + nu) : (i + 1) * (nx + nu)][:nx]
+            )
+            last_prediction_u.append(
+                opt_variables[i * (nx + nu) : (i + 1) * (nx + nu)][nx:]
+            )
+        last_prediction_x.append(opt_variables[Nf * (nx + nu) : (Nf + 1) * (nx + nu)])
 
         # check exit flag
         stats = self.solver.stats()
@@ -2024,14 +2053,14 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
-    # closed_loop(
-    #     controller=NMPCController(),
-    #     track_name="fsds_competition_1",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_trajectories_from_file(
-    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    # )
+    closed_loop(
+        controller=NMPCController(),
+        track_name="fsds_competition_1",
+        data_file="closed_loop_data.npz",
+    )
+    visualize_trajectories_from_file(
+        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    )
 
     # ic(
     #     DPCController.generate_constant_curvature_trajectories(
@@ -2077,19 +2106,19 @@ if __name__ == "__main__":
     # )
 
     # viz DPC open loop predictions
-    DPCController(
-        **net_config,
-        weights_file="best.ckpt",
-    ).compute_open_loop_predictions(
-        dataset_filename="data/dpc/finetuning/dataset.csv",
-        data_file="open_loop_data.npz",
-        batch_sizes=(None, None),
-    )
-    visualize_trajectories_from_file(
-        data_file="open_loop_data.npz",
-        image_file="open_loop_data.png",
-        viz_mode=VizMode.OPEN_LOOP,
-    )
+    # DPCController(
+    #     **net_config,
+    #     weights_file="best.ckpt",
+    # ).compute_open_loop_predictions(
+    #     dataset_filename="data/dpc/finetuning/dataset.csv",
+    #     data_file="open_loop_data.npz",
+    #     batch_sizes=(None, None),
+    # )
+    # visualize_trajectories_from_file(
+    #     data_file="open_loop_data.npz",
+    #     image_file="open_loop_data.png",
+    #     viz_mode=VizMode.OPEN_LOOP,
+    # )
 
     # run closed loop experiment with DPC controller
     # closed_loop(

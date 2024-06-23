@@ -14,3 +14,7 @@ acados_ocp.json
 *.egg
 *.egg-info
 .DS_Store
+*.mtx
+casadi
+fatrop_demo
+*.casadi
