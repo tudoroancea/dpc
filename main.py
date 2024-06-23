@@ -4,8 +4,8 @@ import platform
 from abc import ABC, abstractmethod
 from copy import copy
 from enum import Enum
-from multiprocessing import Manager, Pool, cpu_count
-from multiprocessing.shared_memory import SharedMemory
+from functools import partial
+from multiprocessing import Pool, cpu_count
 from time import perf_counter
 from typing import OrderedDict
 
@@ -28,7 +28,7 @@ from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
 from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
-from tqdm import tqdm, trange
+from tqdm import trange
 
 # misc configs
 L.seed_everything(127)
@@ -404,7 +404,10 @@ class NMPCController(Controller):
 
         # check exit flag
         stats = self.solver.stats()
-        if not stats["success"]:
+        if (
+            not stats["success"]
+            and stats["return_status"] != "Maximum_Iterations_Exceeded"
+        ):
             ic(stats)
             raise ValueError(stats["return_status"])
 
@@ -415,6 +418,26 @@ class NMPCController(Controller):
                 runtime=runtime, cost=sol["f"], num_iters=stats["iter_count"]
             ),
         )
+
+
+def job(process_df: np.ndarray):
+    reference_controller = NMPCController()
+    result = np.zeros((process_df.shape[0], (1 + nu * Nf)))
+    for i in range(process_df.shape[0]):
+        x_ref = process_df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
+        _, u_ref, stats = reference_controller.control(
+            X=process_df[i, 0],
+            Y=process_df[i, 1],
+            phi=process_df[i, 2],
+            v=process_df[i, 3],
+            X_ref=x_ref[:, 0],
+            Y_ref=x_ref[:, 1],
+            phi_ref=x_ref[:, 2],
+            v_ref=x_ref[:, 3],
+        )
+        result[i, :-1] = u_ref.ravel()
+        result[i, -1] = stats.cost
+    return result
 
 
 class DPCController(Controller):
@@ -484,27 +507,27 @@ class DPCController(Controller):
 
     @staticmethod
     def compute_mpc_output(df: np.ndarray) -> np.ndarray:
+        """
+        Compute the output of the NMPCController for each sample in the dataset.
+        """
+        # split the dataset for each process
         n_samples = df.shape[0]
-        reference_controller = NMPCController()
-        progress_bar = trange(n_samples)
-        for i in progress_bar:
-            x_ref = df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
-            _, u_ref, stats = reference_controller.control(
-                X=df[i, 0],
-                Y=df[i, 1],
-                phi=df[i, 2],
-                v=df[i, 3],
-                X_ref=x_ref[:, 0],
-                Y_ref=x_ref[:, 1],
-                phi_ref=x_ref[:, 2],
-                v_ref=x_ref[:, 3],
-            )
-            df[i, -nu * Nf - 1 : -1] = u_ref.ravel()
-            df[i, -1] = stats.cost
-            progress_bar.set_description(
-                f"num_iters: {stats.num_iters}, cost: {stats.cost}"
-            )
-        return df
+        nprocesses = cpu_count()
+        # nprocesses = 1
+        n_sample_per_process = n_samples // nprocesses
+        df_per_process = []
+        for i in range(nprocesses):
+            start = i * n_sample_per_process
+            end = (i + 1) * n_sample_per_process if i < nprocesses - 1 else n_samples
+            df_per_process.append(df[start:end])
+
+        start = perf_counter()
+        with Pool(nprocesses) as p:
+            results = np.vstack(p.map(job, df_per_process))
+        end = perf_counter()
+        ic(end - start)
+
+        return results
 
     @staticmethod
     def save_dataset(df: np.ndarray, filename: str):
@@ -551,10 +574,7 @@ class DPCController(Controller):
 
         # check in with the user before actually generating the dataset
         n_samples = n_trajs * n_lat * n_phi * n_v
-        n_features = nx + (Nf + 1) * nx + Nf * nu + 1
-        answer = input(
-            f"Generating dataset with {n_samples} samples of {n_features} features ? [y/n] "
-        )
+        answer = input(f"Generating dataset with {n_samples} samples? [y/n] ")
         if answer != "y":
             return
 
@@ -564,7 +584,7 @@ class DPCController(Controller):
         vel_errors = np.linspace(-5.0, 5.0, n_v)
 
         # compute the combinations of initial states and state reference
-        df = np.full((n_samples, n_features), np.nan)
+        df = np.full((n_samples, nx * (Nf + 2)), np.nan)
         for sample_id, (traj, lat_err, heading_err, vel_err) in enumerate(
             itertools.product(
                 trajectories,
@@ -591,7 +611,7 @@ class DPCController(Controller):
             )
 
         # go over all the data and compute the output of the NMPCController
-        df = DPCController.compute_mpc_output(df)
+        df = np.hstack((df, DPCController.compute_mpc_output(df)))
 
         # save data to csv file
         DPCController.save_dataset(df, filename)
@@ -647,7 +667,7 @@ class DPCController(Controller):
         )
 
         # compute the output of the NMPCController
-        df = DPCController.compute_mpc_output(df)
+        df = np.hstack((df, DPCController.compute_mpc_output(df)))
 
         # save the dataset
         DPCController.save_dataset(df, filename)
