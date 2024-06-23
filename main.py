@@ -337,34 +337,41 @@ class NMPCController(Controller):
             )
         )
 
+        # select solver
+        solver = "ipopt"
+        # solver = "fatrop"
+        if solver == "ipopt":
+            options = {
+                "print_time": 0,
+                "ipopt": {"sb": "yes", "print_level": 0},
+            }
+        elif solver == "fatrop":
+            options = {
+                "print_time": 0,
+                "debug": False,
+                "structure_detection": "auto",
+                "equality": np.ones(eq_constraints.shape[0], dtype=bool),
+                "fatrop": {"print_level": 0},
+            }
+        if platform.system() != "Linux":
+            options.update(
+                {
+                    "jit": True,
+                    "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
+                }
+            )
+
         # assemble solver
         self.solver = nlpsol(
             "nmpc",
-            "ipopt",
-            # "fatrop",
+            solver,
             {
                 "x": optimization_variables,
                 "f": cost_function,
                 "g": eq_constraints,
                 "p": parameters,
             },
-            {
-                "print_time": 0,
-                "ipopt": {"sb": "yes", "print_level": 0},
-                # "expand": True,
-                # "debug": False,
-                # "structure_detection": "auto",
-                # "equality": np.ones(eq_constraints.shape[0], dtype=bool),
-                # "fatrop": {"print_level": 0},
-            }
-            | (
-                {}
-                if platform.system() == "Linux"
-                else {
-                    "jit": True,
-                    "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
-                }
-            ),
+            options,
         )
 
     def control(
