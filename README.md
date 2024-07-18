@@ -1,5 +1,28 @@
 # dpc
 
+## setup
+We provide below a setup example using [`uv`](https://github.com/astral-sh/uv), but you should be able to do everything with plain `venv` and `pip`.
+
+```bash
+git clone https://github.com/tudoroancea/dpc
+cd dpc
+uv venv
+. .venv/bin/activate
+uv pip install -e '.[dev]'
+```
+
+If you are on linux, also do the following:
+
+```bash
+uv pip install -e '.[linux]' 
+```
+
+### casadi setup:
+
+To be able to use [fatrop](https://github.com/meco-group/fatrop), install the nightly wheels from https://github.com/casadi/casadi/releases/tag/nightly-plugin_madnlp2.
+
+## discoveries
+
 - The cost is very big because we have very extreme initial conditions, that don't often appear in the closed loop experiments we did. 
   We can keep these but maybe do several training phases:
 

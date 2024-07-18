@@ -10,7 +10,7 @@ dependencies = [
     "matplotlib",
     "scipy",
     "qpsolvers[osqp]",
-    "casadi",
+    # "casadi", # install wheels from https://github.com/casadi/casadi/releases/tag/nightly-plugin_madnlp2
     "icecream",
     "tqdm",
     "torch",
