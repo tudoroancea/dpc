@@ -332,6 +332,7 @@ class NMPCController(Controller):
             # initial state constraint
             if i == 0:
                 opti.subject_to(x[i] == x0)
+            # NOTE: here we can't use opti.bounded() for some reason (fatrop doesn't detect the constraints)
             opti.subject_to(-T_max <= (u[i][0] <= T_max))
             opti.subject_to(-delta_max <= (u[i][1] <= delta_max))
 
@@ -411,12 +412,13 @@ class NMPCController(Controller):
         phi_ref: FloatArray,
         v_ref: FloatArray,
     ):
-        X, Y, phi, v
+        X, Y, phi, v  # silence 'unused' warnings
+        T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref * v_ref) / C_m0
         for i in range(Nf):
             self.opti.set_initial(
                 self.x[i], np.array([X_ref[i], Y_ref[i], phi_ref[i], v_ref[i]])
             )
-            self.opti.set_initial(self.u[i], np.zeros(nu))
+            self.opti.set_initial(self.u[i], np.array([T_ref[i], 0.0]))
         self.opti.set_initial(
             self.x[Nf], np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]])
         )
@@ -2077,8 +2079,8 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
     closed_loop(
-        controller=NMPCController(solver="ipopt"),
-        Tsim=dt * 473,
+        controller=NMPCController(solver="fatrop", jit=True),
+        # Tsim=dt * 473,
         track_name="fsds_competition_1",
         data_file="closed_loop_data.npz",
     )
