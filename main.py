@@ -384,6 +384,23 @@ class NMPCController(Controller):
         self.u = u
         self.cost_function = cost_function
 
+        # call once the solver with dummy data so that the code generation takes place
+        # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger codegen)
+        if jit:
+            print("Generating code... ", end="", flush=True)
+            start = perf_counter()
+            self.control(
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+            )
+            print(f"done in {perf_counter()-start:.2f} s")
+
     def update_params(
         self,
         X: float,
