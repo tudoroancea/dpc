@@ -353,13 +353,12 @@ class NMPCController(Controller):
                 "equality": np.ones(eq_constraints.shape[0], dtype=bool),
                 "fatrop": {"print_level": 0},
             }
-        if platform.system() != "Linux":
-            options.update(
-                {
-                    "jit": True,
-                    "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
-                }
-            )
+        options.update(
+            {
+                "jit": False,
+                "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
+            }
+        )
 
         # assemble solver
         self.solver = nlpsol(
