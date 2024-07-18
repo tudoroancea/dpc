@@ -1,13 +1,11 @@
 import itertools
 import os
-import platform
 from abc import ABC, abstractmethod
 from copy import copy
 from enum import Enum
-from functools import partial
 from multiprocessing import Pool, cpu_count
 from time import perf_counter
-from typing import OrderedDict
+from typing import OrderedDict, Literal
 
 import lightning as L
 import matplotlib.axes
@@ -19,7 +17,7 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from casadi import SX, Function, cos, nlpsol, sin, tanh, vertcat
+from casadi import SX, MX, Function, cos, nlpsol, sin, tanh, vertcat, Opti, OptiSol
 from icecream import ic
 from lightning import Fabric
 from qpsolvers import solve_qp
@@ -241,30 +239,44 @@ class Controller(ABC):
 
 class NMPCController(Controller):
     discrete_dynamics: Function
-    solver: Function
+    opti: Opti
+    # parameters
+    x0: MX
+    X_ref: MX
+    Y_ref: MX
+    phi_ref: MX
+    v_ref: MX
+    x: list[MX]
+    u: list[MX]
+    cost_function: MX
 
-    def __init__(self, cost_weights: CostWeights = CostWeights(), **kwargs):
+    def __init__(
+        self,
+        cost_weights: CostWeights = CostWeights(),
+        solver: Literal["fatrop", "ipopt"] = "ipopt",
+        jit: bool = False,
+        **kwargs,
+    ):
         super().__init__(cost_weights)
 
         # instantiate casadi function for discrete dynamics
         self.discrete_dynamics = get_discrete_dynamics_casadi()
 
-        # optimization variables
-        x = [SX.sym(f"x_{i}", nx) for i in range(Nf + 1)]
-        u = [SX.sym(f"u_{i}", nu) for i in range(Nf)]
-        optimization_variables = []
+        # declare optimization variables
+        opti = Opti()
+        x = []
+        u = []
         for i in range(Nf):
-            optimization_variables.append(x[i])
-            optimization_variables.append(u[i])
-        optimization_variables.append(x[Nf])
-        optimization_variables = vertcat(*optimization_variables)
+            x.append(opti.variable(nx))
+            u.append(opti.variable(nu))
+        x.append(opti.variable(nx))
 
-        # parameters
-        X_ref = SX.sym("X_ref", Nf + 1)
-        Y_ref = SX.sym("Y_ref", Nf + 1)
-        phi_ref = SX.sym("phi_ref", Nf + 1)
-        v_ref = SX.sym("v_ref", Nf + 1)
-        parameters = vertcat(X_ref, Y_ref, phi_ref, v_ref)
+        # declare parameters
+        x0 = opti.parameter(nx)
+        X_ref = opti.parameter(Nf + 1)
+        Y_ref = opti.parameter(Nf + 1)
+        phi_ref = opti.parameter(Nf + 1)
+        v_ref = opti.parameter(Nf + 1)
 
         # construct cost function
         cost_function = 0.0
@@ -310,68 +322,110 @@ class NMPCController(Controller):
             + self.cost_weights.q_phi_f * (phi - phi_ref[Nf]) ** 2
             + self.cost_weights.q_v_f * (v - v_ref[Nf]) ** 2
         )
+        opti.minimize(cost_function)
 
-        # equality constraints
-        eq_constraints = vertcat(
-            *[self.discrete_dynamics(x[i], u[i]) - x[i + 1] for i in range(Nf)]
-        )
-        self.lbg = np.zeros(eq_constraints.shape[0])
-        self.ubg = np.zeros(eq_constraints.shape[0])
+        # formulate OCP constraints
+        # NOTE: the order in which the constraints are declared is important for fatrop
+        for i in range(Nf):
+            # equality constraints coming from the dynamics
+            opti.subject_to(x[i + 1] == self.discrete_dynamics(x[i], u[i]))
+            # initial state constraint
+            if i == 0:
+                opti.subject_to(x[i] == x0)
+            opti.subject_to(-T_max <= (u[i][0] <= T_max))
+            opti.subject_to(-delta_max <= (u[i][1] <= delta_max))
 
-        # simple bounds
-        self.lbx = np.concatenate(
-            (
-                np.tile(
-                    np.array([-np.inf, -np.inf, -np.inf, -np.inf, -T_max, -delta_max]),
-                    Nf,
-                ),
-                np.array([-np.inf, -np.inf, -np.inf, -np.inf]),
-            )
-        )
-        self.ubx = np.concatenate(
-            (
-                np.tile(
-                    np.array([np.inf, np.inf, np.inf, np.inf, T_max, delta_max]), Nf
-                ),
-                np.array([np.inf, np.inf, np.inf, np.inf]),
-            )
-        )
-
-        # select solver
-        solver = "ipopt"
-        # solver = "fatrop"
+        # choose solver options
         if solver == "ipopt":
             options = {
                 "print_time": 0,
+                "expand": True,
                 "ipopt": {"sb": "yes", "print_level": 0},
             }
         elif solver == "fatrop":
+            # probably there is a problem with the fact that we specify the
             options = {
                 "print_time": 0,
                 "debug": False,
+                "expand": True,
+                # "structure_detection": "manual",
+                # "N": Nf,
+                # "nx": np.full((Nf + 1,), nx, dtype=int),
+                # "nu": np.append(np.full((Nf,), nu, dtype=int), 0),
+                # "ng": np.concatenate(
+                #     (
+                #         np.array([nx + nu]),
+                #         np.full((Nf - 1,), nu, dtype=int),
+                #         np.array([0]),
+                #     )
+                # ),
                 "structure_detection": "auto",
-                "equality": np.ones(eq_constraints.shape[0], dtype=bool),
                 "fatrop": {"print_level": 0},
             }
         options.update(
             {
-                "jit": False,
+                "jit": jit,
                 "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
             }
         )
 
         # assemble solver
-        self.solver = nlpsol(
-            "nmpc",
-            solver,
-            {
-                "x": optimization_variables,
-                "f": cost_function,
-                "g": eq_constraints,
-                "p": parameters,
-            },
-            options,
+        opti.solver(solver, options)
+
+        # save variables as attributes
+        self.opti = opti
+        self.x0 = x0
+        self.X_ref = X_ref
+        self.Y_ref = Y_ref
+        self.phi_ref = phi_ref
+        self.v_ref = v_ref
+        self.x = x
+        self.u = u
+        self.cost_function = cost_function
+
+    def update_params(
+        self,
+        X: float,
+        Y: float,
+        phi: float,
+        v: float,
+        X_ref: FloatArray,
+        Y_ref: FloatArray,
+        phi_ref: FloatArray,
+        v_ref: FloatArray,
+    ):
+        self.opti.set_value(self.x0, np.array([X, Y, phi, v]))
+        self.opti.set_value(self.X_ref, X_ref)
+        self.opti.set_value(self.Y_ref, Y_ref)
+        self.opti.set_value(self.phi_ref, phi_ref)
+        self.opti.set_value(self.v_ref, v_ref)
+
+    def set_initial_guess(
+        self,
+        X: float,
+        Y: float,
+        phi: float,
+        v: float,
+        X_ref: FloatArray,
+        Y_ref: FloatArray,
+        phi_ref: FloatArray,
+        v_ref: FloatArray,
+    ):
+        X, Y, phi, v
+        for i in range(Nf):
+            self.opti.set_initial(
+                self.x[i], np.array([X_ref[i], Y_ref[i], phi_ref[i], v_ref[i]])
+            )
+            self.opti.set_initial(self.u[i], np.zeros(nu))
+        self.opti.set_initial(
+            self.x[Nf], np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]])
         )
+
+    def extract_solution(self, sol: OptiSol) -> tuple[float, FloatArray, FloatArray]:
+        cost = sol.value(self.cost_function)
+        last_prediction_x = np.array([sol.value(self.x[i]) for i in range(Nf + 1)])
+        last_prediction_u = np.array([sol.value(self.u[i]) for i in range(Nf)])
+        return cost, last_prediction_x, last_prediction_u
 
     def control(
         self,
@@ -384,74 +438,37 @@ class NMPCController(Controller):
         phi_ref: FloatArray,
         v_ref: FloatArray,
     ) -> tuple[FloatArray, FloatArray, ControllerStats]:
-        # set initial state
-        x0 = np.array([X, Y, phi, v])
-        self.lbx[:nx] = x0
-        self.ubx[:nx] = x0
+        # setup problem
+        self.update_params(X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref)
+        self.set_initial_guess(X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref)
 
-        # create guess
-        initial_guess = np.concatenate(
-            (
-                np.reshape(
-                    np.concatenate(
-                        (
-                            X_ref[:Nf, None],
-                            Y_ref[:Nf, None],
-                            phi_ref[:Nf, None],
-                            v_ref[:Nf, None],
-                            np.zeros((Nf, nu)),
-                        ),
-                        axis=1,
-                    ),
-                    Nf * (nx + nu),
-                ),
-                np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]]),
-            )
-        )
-        # initial_guess = np.zeros((Nf + 1) * nx + Nf * nu)
-
-        parameters = np.concatenate((X_ref, Y_ref, phi_ref, v_ref))
         # solve the optimization problem
         start = perf_counter()
-        sol = self.solver(
-            x0=initial_guess,
-            p=parameters,
-            lbx=self.lbx,
-            ubx=self.ubx,
-            lbg=self.lbg,
-            ubg=self.ubg,
-        )
+        # try:
+        sol = self.opti.solve()
+        # except RuntimeError as err:
+        #     print(err)
+        # breakpoint()
+
         stop = perf_counter()
         runtime = stop - start
 
         # extract solution
-        opt_variables = sol["x"].full().ravel()
-        last_prediction_x = []
-        last_prediction_u = []
-        for i in range(Nf):
-            last_prediction_x.append(
-                opt_variables[i * (nx + nu) : (i + 1) * (nx + nu)][:nx]
-            )
-            last_prediction_u.append(
-                opt_variables[i * (nx + nu) : (i + 1) * (nx + nu)][nx:]
-            )
-        last_prediction_x.append(opt_variables[Nf * (nx + nu) : (Nf + 1) * (nx + nu)])
+        cost, last_prediction_x, last_prediction_u = self.extract_solution(sol)
 
         # check exit flag
-        stats = self.solver.stats()
+        stats = self.opti.stats()
         if (
             not stats["success"]
             and stats["return_status"] != "Maximum_Iterations_Exceeded"
         ):
             ic(stats)
-            raise ValueError(stats["return_status"])
+            raise RuntimeError(stats["return_status"])
 
         return (
             last_prediction_x,
             last_prediction_u,
-            ControllerStats(
-                runtime=runtime, cost=sol["f"], num_iters=stats["iter_count"]
-            ),
+            ControllerStats(runtime=runtime, cost=cost, num_iters=stats["iter_count"]),
         )
 
 
@@ -1643,7 +1660,7 @@ def closed_loop(
             x_pred, u_pred, stats = controller.control(
                 X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
             )
-        except ValueError as e:
+        except RuntimeError as e:
             print(f"Error in iteration {i}: {e}")
             break
         u_current = u_pred[0]
@@ -2060,7 +2077,8 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 if __name__ == "__main__":
     # run closed loop experiment with NMPC controller
     closed_loop(
-        controller=NMPCController(),
+        controller=NMPCController(solver="ipopt"),
+        Tsim=dt * 473,
         track_name="fsds_competition_1",
         data_file="closed_loop_data.npz",
     )
