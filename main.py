@@ -17,7 +17,20 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from casadi import SX, MX, Function, cos, nlpsol, sin, tanh, vertcat, Opti, OptiSol
+from casadi import (
+    SX,
+    MX,
+    Function,
+    cos,
+    nlpsol,
+    sin,
+    tanh,
+    vertcat,
+    horzcat,
+    hcat,
+    Opti,
+    OptiSol,
+)
 from icecream import ic
 from lightning import Fabric
 from qpsolvers import solve_qp
@@ -255,6 +268,7 @@ class NMPCController(Controller):
         cost_weights: CostWeights = CostWeights(),
         solver: Literal["fatrop", "ipopt"] = "ipopt",
         jit: bool = False,
+        codegen: bool = False,
         **kwargs,
     ):
         super().__init__(cost_weights)
@@ -341,7 +355,7 @@ class NMPCController(Controller):
             options = {
                 "print_time": 0,
                 "expand": True,
-                "ipopt": {"sb": "yes", "print_level": 0},
+                "ipopt": {"sb": "yes", "print_level": 3, "max_resto_iter": 0},
             }
         elif solver == "fatrop":
             # probably there is a problem with the fact that we specify the
@@ -361,7 +375,7 @@ class NMPCController(Controller):
                 #     )
                 # ),
                 "structure_detection": "auto",
-                "fatrop": {"print_level": 0},
+                "fatrop": {"print_level": 1},
             }
         options.update(
             {
@@ -372,6 +386,30 @@ class NMPCController(Controller):
 
         # assemble solver
         opti.solver(solver, options)
+
+        if codegen:
+            # states = horzcat(*x).T
+            # controls = horzcat(*u).T
+            states = hcat(x)
+            controls = hcat(u)
+            solver_function = opti.to_function(
+                f"nmpc_solver_{solver}",
+                [x0, X_ref, Y_ref, phi_ref, v_ref, states, controls],
+                [states, controls, cost_function],
+                ["x0", "X_ref", "Y_ref", "phi_ref", "v_ref", "x_guess", "u_guess"],
+                ["x_opt", "u_opt", "cost_function"],
+            )
+            ic(solver_function)
+            solver_function.generate(
+                f"nmpc_solver_{solver}.c",
+                {
+                    "with_mem": True,
+                    "with_header": True,
+                    "verbose": True,
+                    "indent": 4,
+                    "main": True,
+                },
+            )
 
         # save variables as attributes
         self.opti = opti
@@ -463,11 +501,12 @@ class NMPCController(Controller):
 
         # solve the optimization problem
         start = perf_counter()
-        # try:
-        sol = self.opti.solve()
-        # except RuntimeError as err:
-        #     print(err)
-        # breakpoint()
+        try:
+            sol = self.opti.solve_limited()
+        except RuntimeError as err:
+            breakpoint()
+            print(err)
+            raise err
 
         stop = perf_counter()
         runtime = stop - start
@@ -482,6 +521,7 @@ class NMPCController(Controller):
             and stats["return_status"] != "Maximum_Iterations_Exceeded"
         ):
             ic(stats)
+            breakpoint()
             raise RuntimeError(stats["return_status"])
 
         return (
@@ -1420,7 +1460,6 @@ class MotionPlanner:
         # )
         phi_ref = get_heading(coeffs_X, coeffs_Y, idx_interp, t_interp)
         kappa_ref = get_curvature(coeffs_X, coeffs_Y, idx_interp, t_interp)
-        ic(kappa_ref.min(), kappa_ref.max())
         # v_ref = np.minimum(v_max, np.sqrt(a_lat_max / np.abs(kappa_ref)))
 
         lap_length = s_ref[-1] + np.hypot(X_ref[-1] - X_ref[0], Y_ref[-1] - Y_ref[0])
@@ -2094,16 +2133,16 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 
 if __name__ == "__main__":
+    NMPCController(solver="fatrop", jit=False, codegen=True)
     # run closed loop experiment with NMPC controller
-    closed_loop(
-        controller=NMPCController(solver="fatrop", jit=True),
-        # Tsim=dt * 473,
-        track_name="fsds_competition_1",
-        data_file="closed_loop_data.npz",
-    )
-    visualize_trajectories_from_file(
-        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    )
+    # closed_loop(
+    #     controller=NMPCController(solver="ipopt", jit=False),
+    #     track_name="fsds_competition_1",
+    #     data_file="closed_loop_data.npz",
+    # )
+    # visualize_trajectories_from_file(
+    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    # )
 
     # ic(
     #     DPCController.generate_constant_curvature_trajectories(
