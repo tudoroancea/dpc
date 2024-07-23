@@ -5,6 +5,7 @@ c_generated_code
 acados_ocp.json
 *.png
 *.npz
+*.h
 *.c
 *.o
 *.dylib

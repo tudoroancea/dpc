@@ -22,7 +22,6 @@ from casadi import (
     MX,
     Function,
     cos,
-    nlpsol,
     sin,
     tanh,
     vertcat,
@@ -31,6 +30,7 @@ from casadi import (
     Opti,
     OptiSol,
 )
+import casadi as ca
 from icecream import ic
 from lightning import Fabric
 from qpsolvers import solve_qp
@@ -67,6 +67,7 @@ nx = 4  # state dimension
 nu = 2  # control dimension
 dt = 1 / 20  # sampling time
 
+# compute max speed of the car
 
 ################################################################################
 # utils
@@ -315,7 +316,11 @@ class NMPCController(Controller):
             # stage control costs
             T = u[i][0]
             delta = u[i][1]
-            T_ref = (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2) / C_m0
+            T_ref = (
+                tanh(10 * v_ref[i])
+                * (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2)
+                / C_m0
+            )
             cost_function += (
                 self.cost_weights.r_T * (T - T_ref) ** 2
                 + self.cost_weights.r_delta * delta**2
@@ -388,10 +393,8 @@ class NMPCController(Controller):
         opti.solver(solver, options)
 
         if codegen:
-            # states = horzcat(*x).T
-            # controls = horzcat(*u).T
-            states = hcat(x)
-            controls = hcat(u)
+            states = horzcat(*x)
+            controls = horzcat(*u)
             solver_function = opti.to_function(
                 f"nmpc_solver_{solver}",
                 [x0, X_ref, Y_ref, phi_ref, v_ref, states, controls],
@@ -427,7 +430,7 @@ class NMPCController(Controller):
         if jit:
             print("Generating code... ", end="", flush=True)
             start = perf_counter()
-            self.control(
+            control = self.control(
                 0.0,
                 0.0,
                 0.0,
@@ -437,7 +440,8 @@ class NMPCController(Controller):
                 np.zeros(Nf + 1),
                 np.zeros(Nf + 1),
             )
-            print(f"done in {perf_counter()-start:.2f} s")
+            ic(control)
+            print(f"done in {perf_counter() - start:.2f} s")
 
     def update_params(
         self,
@@ -714,7 +718,12 @@ class DPCController(Controller):
                 (
                     np.reshape(
                         np.column_stack(
-                            (X_ref, Y_ref, phi_ref, v_ref * np.ones_like(X_ref))
+                            (
+                                X_ref,
+                                Y_ref,
+                                phi_ref,
+                                v_ref * np.ones_like(X_ref),
+                            )
                         ),
                         nx * (Nf + 1),
                     ),
@@ -1054,7 +1063,7 @@ class DPCController(Controller):
 
             # logging
             progress_bar.set_description(
-                f"Epoch {epoch+1}, train loss: {total_train_loss:.4f}, val loss: {val_loss:.4f}, best val loss: {best_val_loss:.4f}"
+                f"Epoch {epoch + 1}, train loss: {total_train_loss:.4f}, val loss: {val_loss:.4f}, best val loss: {best_val_loss:.4f}"
             )
 
         # save final weights
@@ -1139,7 +1148,12 @@ class DPCController(Controller):
         current_state = np.array([X - X_ref_0, Y - Y_ref_0, phi - phi_ref_0, v])
         current_state[:2] = R @ current_state[:2]
         ref = np.column_stack(
-            (X_ref - X_ref_0, Y_ref - Y_ref_0, phi_ref - phi_ref_0, v_ref)
+            (
+                X_ref - X_ref_0,
+                Y_ref - Y_ref_0,
+                phi_ref - phi_ref_0,
+                v_ref,
+            )
         )
         ref[:, :2] = ref[:, :2] @ R.T
 
@@ -1226,7 +1240,11 @@ def fit_spline(
             np.concatenate((-np.ones(N), -rho, -2 * rho**2)),
             (
                 np.concatenate(
-                    (3 * np.arange(N), 1 + 3 * np.arange(N), 2 + 3 * np.arange(N))
+                    (
+                        3 * np.arange(N),
+                        1 + 3 * np.arange(N),
+                        2 + 3 * np.arange(N),
+                    )
                 ),
                 np.concatenate(
                     (
@@ -1723,7 +1741,7 @@ def closed_loop(
             break
         u_current = u_pred[0]
         progress_bar.set_description(
-            f"Runtime: {1000*stats.runtime:.2f} ms, cost: {stats.cost:.2f}"
+            f"Runtime: {1000 * stats.runtime:.2f} ms, cost: {stats.cost:.2f}"
         )
         # add data to arrays
         all_runtimes.append(stats.runtime)
@@ -2032,7 +2050,10 @@ def visualize_trajectories(
                         subplot_info["data"]["ref"][it, :, 1],
                     )
                     all_points = np.concatenate(
-                        (all_points, subplot_info["data"]["ref"][it])
+                        (
+                            all_points,
+                            subplot_info["data"]["ref"][it],
+                        )
                     )
 
                 old_xlim = axes[subplot_name].get_xlim()
@@ -2133,7 +2154,7 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 
 if __name__ == "__main__":
-    NMPCController(solver="fatrop", jit=False, codegen=True)
+    NMPCController(solver="ipopt", jit=False, codegen=False)
     # run closed loop experiment with NMPC controller
     # closed_loop(
     #     controller=NMPCController(solver="ipopt", jit=False),
