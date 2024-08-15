@@ -1,4 +1,5 @@
 import itertools
+import json
 import os
 from abc import ABC, abstractmethod
 from copy import copy
@@ -66,8 +67,6 @@ Nf = 40  # horizon size
 nx = 4  # state dimension
 nu = 2  # control dimension
 dt = 1 / 20  # sampling time
-
-# compute max speed of the car
 
 ################################################################################
 # utils
@@ -252,7 +251,9 @@ class Controller(ABC):
 
 
 class NMPCController(Controller):
+    # system dynamics
     discrete_dynamics: Function
+    # optimization problem
     opti: Opti
     # parameters
     x0: MX
@@ -260,8 +261,10 @@ class NMPCController(Controller):
     Y_ref: MX
     phi_ref: MX
     v_ref: MX
+    # optimization variables
     x: list[MX]
     u: list[MX]
+    # cost function
     cost_function: MX
 
     def __init__(
@@ -360,7 +363,7 @@ class NMPCController(Controller):
             options = {
                 "print_time": 0,
                 "expand": True,
-                "ipopt": {"sb": "yes", "print_level": 3, "max_resto_iter": 0},
+                "ipopt": {"sb": "yes", "print_level": 0, "max_resto_iter": 0},
             }
         elif solver == "fatrop":
             # probably there is a problem with the fact that we specify the
@@ -368,19 +371,8 @@ class NMPCController(Controller):
                 "print_time": 0,
                 "debug": False,
                 "expand": True,
-                # "structure_detection": "manual",
-                # "N": Nf,
-                # "nx": np.full((Nf + 1,), nx, dtype=int),
-                # "nu": np.append(np.full((Nf,), nu, dtype=int), 0),
-                # "ng": np.concatenate(
-                #     (
-                #         np.array([nx + nu]),
-                #         np.full((Nf - 1,), nu, dtype=int),
-                #         np.array([0]),
-                #     )
-                # ),
                 "structure_detection": "auto",
-                "fatrop": {"print_level": 1},
+                "fatrop": {"print_level": 0},
             }
         options.update(
             {
@@ -430,7 +422,7 @@ class NMPCController(Controller):
         if jit:
             print("Generating code... ", end="", flush=True)
             start = perf_counter()
-            control = self.control(
+            self.control(
                 0.0,
                 0.0,
                 0.0,
@@ -440,7 +432,6 @@ class NMPCController(Controller):
                 np.zeros(Nf + 1),
                 np.zeros(Nf + 1),
             )
-            ic(control)
             print(f"done in {perf_counter() - start:.2f} s")
 
     def update_params(
@@ -462,16 +453,11 @@ class NMPCController(Controller):
 
     def set_initial_guess(
         self,
-        X: float,
-        Y: float,
-        phi: float,
-        v: float,
         X_ref: FloatArray,
         Y_ref: FloatArray,
         phi_ref: FloatArray,
         v_ref: FloatArray,
     ):
-        X, Y, phi, v  # silence 'unused' warnings
         T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref * v_ref) / C_m0
         for i in range(Nf):
             self.opti.set_initial(
@@ -501,15 +487,29 @@ class NMPCController(Controller):
     ) -> tuple[FloatArray, FloatArray, ControllerStats]:
         # setup problem
         self.update_params(X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref)
-        self.set_initial_guess(X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref)
+        self.set_initial_guess(X_ref, Y_ref, phi_ref, v_ref)
 
         # solve the optimization problem
         start = perf_counter()
         try:
             sol = self.opti.solve_limited()
         except RuntimeError as err:
-            breakpoint()
+            with open("bruh.json", "w") as f:
+                json.dump(
+                    {
+                        "X": X,
+                        "Y": Y,
+                        "phi": phi,
+                        "v": v,
+                        "X_ref": X_ref.tolist(),
+                        "Y_ref": Y_ref.tolist(),
+                        "phi_ref": phi_ref.tolist(),
+                        "v_ref": v_ref.tolist(),
+                    },
+                    f,
+                )
             print(err)
+            breakpoint()
             raise err
 
         stop = perf_counter()
@@ -2154,16 +2154,16 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 
 if __name__ == "__main__":
-    NMPCController(solver="ipopt", jit=False, codegen=False)
+    # NMPCController(solver="ipopt", jit=False, codegen=True)
     # run closed loop experiment with NMPC controller
-    # closed_loop(
-    #     controller=NMPCController(solver="ipopt", jit=False),
-    #     track_name="fsds_competition_1",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_trajectories_from_file(
-    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    # )
+    closed_loop(
+        controller=NMPCController(solver="fatrop", jit=False),
+        track_name="fsds_competition_1",
+        data_file="closed_loop_data.npz",
+    )
+    visualize_trajectories_from_file(
+        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    )
 
     # ic(
     #     DPCController.generate_constant_curvature_trajectories(
