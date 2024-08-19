@@ -2156,8 +2156,9 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 if __name__ == "__main__":
     # NMPCController(solver="ipopt", jit=False, codegen=True)
     # run closed loop experiment with NMPC controller
+    breakpoint()
     closed_loop(
-        controller=NMPCController(solver="fatrop", jit=False),
+        controller=NMPCController(solver="ipopt", jit=False),
         track_name="fsds_competition_1",
         data_file="closed_loop_data.npz",
     )

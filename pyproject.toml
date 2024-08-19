@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=65.0"]
+requires = ["setuptools>=65.0", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,7 +10,7 @@ dependencies = [
     "matplotlib",
     "scipy",
     "qpsolvers[osqp]",
-    # "casadi>=3.6.7", # until 3.6.7 is realeased, install nightly wheels from https://github.com/tudoroancea/casadi/releases/tag/nightly-main
+    # "casadi>=3.6.7", # until 3.6.7 is realeased, install nightly wheels from https://github.com/casadi/casadi/releases/tag/nightly-main
     "icecream",
     "tqdm",
     "torch",
@@ -18,11 +18,18 @@ dependencies = [
     "strongpods@git+https://github.com/tudoroancea/strongpods.git@v2.0.0",
 ]
 
+[project.scripts]
+dpc = "dpc.main:main"
+
 [project.optional-dependencies]
 dev = ["ruff"]
 linux = ["PyQt5"]
+
+[tool.setuptools]
+packages = ["dpc"]
 
 [tool.pyright]
 typeCheckingMode = "off"
 venv = ".venv"
 venvPath = "."
+
