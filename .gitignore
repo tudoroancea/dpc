@@ -19,3 +19,5 @@ acados_ocp.json
 casadi
 fatrop_demo
 *.casadi
+__pycache__
+*.pyc

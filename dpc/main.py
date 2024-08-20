@@ -1,4 +1,5 @@
 import itertools
+from argparse import ArgumentParser
 import json
 import os
 from abc import ABC, abstractmethod
@@ -2154,87 +2155,95 @@ def visualize_trajectories_from_file(data_file: str, **kwargs):
 
 
 if __name__ == "__main__":
-    # NMPCController(solver="ipopt", jit=False, codegen=True)
-    # run closed loop experiment with NMPC controller
-    breakpoint()
-    closed_loop(
-        controller=NMPCController(solver="ipopt", jit=False),
-        track_name="fsds_competition_1",
-        data_file="closed_loop_data.npz",
-    )
-    visualize_trajectories_from_file(
-        data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    )
-
-    # ic(
-    #     DPCController.generate_constant_curvature_trajectories(
-    #         curvatures=np.linspace(-0.1, 0.1, 5)
-    #     )
-    # )
-    # create DPC dataset
-    # DPCController.create_pretraining_dataset(
-    #     "data/dpc/dataset2.csv",
-    #     # n_trajs=31,
-    #     # n_lat=11,
-    #     # n_phi=11,
-    #     # n_v=21,
-    #     n_trajs=5,
-    #     n_lat=5,
-    #     n_phi=5,
-    #     n_v=5,
-    # )
-    # DPCController.create_finetuning_dataset(
-    #     filename="data/dpc/finetuning/dataset.csv",
-    #     n_samples=40000,
-    #     sigma_curvature=0.05,
-    #     sigma_lat=0.1,
-    #     sigma_phi=0.1,
-    #     sigma_v=0.5,
-    # )
+    parser = ArgumentParser(prog="dpc")
+    parser.add_argument("task")
+    parser.add_argument("--solver", default="ipopt")
+    parser.add_argument("--jit", default=False)
+    parser.add_argument("--viz", default=True)
+    parser.add_argument("--track", default="fsds_competition_1")
+    args = parser.parse_args()
 
     net_config = {
         "nhidden": [512] * 2,
         "nonlinearity": "tanh",
     }
 
-    # train DPC
-    # DPCController.train(
-    #     dataset_filename="data/dpc/finetuning/dataset.csv",
-    #     num_epochs=300,
-    #     lr=1e-4,
-    #     # weight_decay=1.0,
-    #     **net_config,
-    #     # weights_filename="data/plan2.pth",
-    #     # training_state_filename="best.ckpt",
-    #     training_state_filename="data/first_encouraging.ckpt",
-    # )
-
-    # viz DPC open loop predictions
-    # DPCController(
-    #     **net_config,
-    #     weights_file="best.ckpt",
-    # ).compute_open_loop_predictions(
-    #     dataset_filename="data/dpc/finetuning/dataset.csv",
-    #     data_file="open_loop_data.npz",
-    #     batch_sizes=(None, None),
-    # )
-    # visualize_trajectories_from_file(
-    #     data_file="open_loop_data.npz",
-    #     image_file="open_loop_data.png",
-    #     viz_mode=VizMode.OPEN_LOOP,
-    # )
-
-    # run closed loop experiment with DPC controller
-    # closed_loop(
-    #     Tsim=5.0,
-    #     controller=DPCController(
-    #         **net_config,
-    #         weights_file="best.ckpt",
-    #         accelerator="cpu",
-    #     ),
-    #     track_name="fsds_competition_1",
-    #     data_file="closed_loop_data.npz",
-    # )
-    # visualize_trajectories_from_file(
-    #     data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
-    # )
+    if args.task == "closed_loop_nmpc":
+        # run closed loop experiment with NMPC controller
+        closed_loop(
+            controller=NMPCController(solver=args.solver, jit=args.jit),
+            track_name=args.track,
+            data_file="closed_loop_data.npz",
+        )
+        if
+        visualize_trajectories_from_file(
+            data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+        )
+    elif args.task == "create_dataset":
+        ic(
+            DPCController.generate_constant_curvature_trajectories(
+                curvatures=np.linspace(-0.1, 0.1, 5)
+            )
+        )
+        # create DPC dataset
+        DPCController.create_pretraining_dataset(
+            "data/dpc/dataset2.csv",
+            # n_trajs=31,
+            # n_lat=11,
+            # n_phi=11,
+            # n_v=21,
+            n_trajs=5,
+            n_lat=5,
+            n_phi=5,
+            n_v=5,
+        )
+        DPCController.create_finetuning_dataset(
+            filename="data/dpc/finetuning/dataset.csv",
+            n_samples=40000,
+            sigma_curvature=0.05,
+            sigma_lat=0.1,
+            sigma_phi=0.1,
+            sigma_v=0.5,
+        )
+    elif args.task == "train":
+        # train DPC
+        DPCController.train(
+            dataset_filename="data/dpc/finetuning/dataset.csv",
+            num_epochs=300,
+            lr=1e-4,
+            # weight_decay=1.0,
+            **net_config,
+            # weights_filename="data/plan2.pth",
+            # training_state_filename="best.ckpt",
+            training_state_filename="data/first_encouraging.ckpt",
+        )
+    elif args.task == "open_loop_dpc"
+        # viz DPC open loop predictions
+        DPCController(
+            **net_config,
+            weights_file="best.ckpt",
+        ).compute_open_loop_predictions(
+            dataset_filename="data/dpc/finetuning/dataset.csv",
+            data_file="open_loop_data.npz",
+            batch_sizes=(None, None),
+        )
+        visualize_trajectories_from_file(
+            data_file="open_loop_data.npz",
+            image_file="open_loop_data.png",
+            viz_mode=VizMode.OPEN_LOOP,
+        )
+    elif args.task == "closed_loop_dpc":
+        # run closed loop experiment with DPC controller
+        closed_loop(
+            Tsim=5.0,
+            controller=DPCController(
+                **net_config,
+                weights_file="best.ckpt",
+                accelerator="cpu",
+            ),
+            track_name="fsds_competition_1",
+            data_file="closed_loop_data.npz",
+        )
+        visualize_trajectories_from_file(
+            data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+        )
