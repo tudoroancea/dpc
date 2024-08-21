@@ -8,7 +8,6 @@ from multiprocessing import Pool, cpu_count
 from time import perf_counter
 from typing import Literal, OrderedDict
 
-import casadi as ca
 import lightning as L
 import matplotlib.axes
 import matplotlib.lines
@@ -19,18 +18,7 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from casadi import (
-    MX,
-    SX,
-    Function,
-    Opti,
-    OptiSol,
-    cos,
-    horzcat,
-    sin,
-    tanh,
-    vertcat,
-)
+import casadi as ca
 from icecream import ic
 from lightning import Fabric
 from qpsolvers import solve_qp
@@ -90,46 +78,47 @@ def unwrap_to_pi(x: FloatArray) -> FloatArray:
 ################################################################################
 
 
-def get_continuous_dynamics_casadi() -> Function:
+def get_continuous_dynamics_casadi() -> ca.Function:
     # state and control variables
-    X = SX.sym("X")
-    Y = SX.sym("Y")
-    phi = SX.sym("phi")
-    v = SX.sym("v")
-    T = SX.sym("T")
-    delta = SX.sym("delta")
-    x = vertcat(X, Y, phi, v)
-    u = vertcat(T, delta)
+    X = ca.SX.sym("X")
+    Y = ca.SX.sym("Y")
+    phi = ca.SX.sym("phi")
+    v = ca.SX.sym("v")
+    T = ca.SX.sym("T")
+    delta = ca.SX.sym("delta")
+    x = ca.vertcat(X, Y, phi, v)
+    u = ca.vertcat(T, delta)
 
     # auxiliary variables
     beta = 0.5 * delta  # slip angle
-    v_x = v * cos(beta)  # longitudinal velocity
+    v_x = v * ca.cos(beta)  # longitudinal velocity
     l_R = 0.5 * wheelbase
 
     # assemble bicycle dynamics
-    return Function(
+    return ca.Function(
         "continuous_dynamics",
         [x, u],
         [
-            vertcat(
-                v * cos(phi + beta),
-                v * sin(phi + beta),
-                v * sin(beta) / l_R,
-                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * tanh(10 * v_x)) / m,
+            ca.vertcat(
+                v * ca.cos(phi + beta),
+                v * ca.sin(phi + beta),
+                v * ca.sin(beta) / l_R,
+                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x))
+                / m,
             )
         ],
     )
 
 
-def get_discrete_dynamics_casadi() -> Function:
-    x = SX.sym("x", nx)
-    u = SX.sym("u", nu)
+def get_discrete_dynamics_casadi() -> ca.Function:
+    x = ca.SX.sym("x", nx)
+    u = ca.SX.sym("u", nu)
     f = get_continuous_dynamics_casadi()
     k1 = f(x, u)
     k2 = f(x + dt / 2 * k1, u)
     k3 = f(x + dt / 2 * k2, u)
     k4 = f(x + dt * k3, u)
-    return Function(
+    return ca.Function(
         "discrete_dynamics", [x, u], [x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)]
     )
 
@@ -251,20 +240,20 @@ class Controller(ABC):
 
 class NMPCController(Controller):
     # system dynamics
-    discrete_dynamics: Function
+    discrete_dynamics: ca.Function
     # optimization problem
-    opti: Opti
+    opti: ca.Opti
     # parameters
-    x0: MX
-    X_ref: MX
-    Y_ref: MX
-    phi_ref: MX
-    v_ref: MX
+    x0: ca.MX
+    X_ref: ca.MX
+    Y_ref: ca.MX
+    phi_ref: ca.MX
+    v_ref: ca.MX
     # optimization variables
-    x: list[MX]
-    u: list[MX]
+    x: list[ca.MX]
+    u: list[ca.MX]
     # cost function
-    cost_function: MX
+    cost_function: ca.MX
 
     def __init__(
         self,
@@ -280,7 +269,7 @@ class NMPCController(Controller):
         self.discrete_dynamics = get_discrete_dynamics_casadi()
 
         # declare optimization variables
-        opti = Opti()
+        opti = ca.Opti()
         x = []
         u = []
         for i in range(Nf):
@@ -301,8 +290,8 @@ class NMPCController(Controller):
             # stage state costs (since the initial state is fixed, we can't optimize
             # the cost at stage 0 and can ignore it in the cost function)
             if i > 0:
-                cp = cos(phi_ref[i])
-                sp = sin(phi_ref[i])
+                cp = ca.cos(phi_ref[i])
+                sp = ca.sin(phi_ref[i])
                 X = x[i][0]
                 Y = x[i][1]
                 phi = x[i][2]
@@ -319,7 +308,7 @@ class NMPCController(Controller):
             T = u[i][0]
             delta = u[i][1]
             T_ref = (
-                tanh(10 * v_ref[i])
+                ca.tanh(10 * v_ref[i])
                 * (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2)
                 / C_m0
             )
@@ -329,8 +318,8 @@ class NMPCController(Controller):
             )
 
         # terminal state costs
-        cp = cos(phi_ref[Nf])
-        sp = sin(phi_ref[Nf])
+        cp = ca.cos(phi_ref[Nf])
+        sp = ca.sin(phi_ref[Nf])
         X = x[Nf][0]
         Y = x[Nf][1]
         phi = x[Nf][2]
@@ -384,8 +373,8 @@ class NMPCController(Controller):
         opti.solver(solver, options)
 
         if codegen:
-            states = horzcat(*x)
-            controls = horzcat(*u)
+            states = ca.horzcat(*x)
+            controls = ca.horzcat(*u)
             solver_function = opti.to_function(
                 f"nmpc_solver_{solver}",
                 [x0, X_ref, Y_ref, phi_ref, v_ref, states, controls],
@@ -467,7 +456,7 @@ class NMPCController(Controller):
             self.x[Nf], np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]])
         )
 
-    def extract_solution(self, sol: OptiSol) -> tuple[float, FloatArray, FloatArray]:
+    def extract_solution(self, sol: ca.OptiSol) -> tuple[float, FloatArray, FloatArray]:
         cost = sol.value(self.cost_function)
         last_prediction_x = np.array([sol.value(self.x[i]) for i in range(Nf + 1)])
         last_prediction_u = np.array([sol.value(self.u[i]) for i in range(Nf)])
