@@ -8,6 +8,7 @@ from multiprocessing import Pool, cpu_count
 from time import perf_counter
 from typing import Literal, OrderedDict
 
+import casadi as ca
 import lightning as L
 import matplotlib.axes
 import matplotlib.lines
@@ -18,7 +19,6 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import casadi as ca
 from icecream import ic
 from lightning import Fabric
 from qpsolvers import solve_qp
@@ -1458,15 +1458,7 @@ class MotionPlanner:
             delta_s=delta_s,
             n_samples=n_samples,
         )
-        # kappa_ref = get_curvature(
-        #     coeffs_X=coeffs_X,
-        #     coeffs_Y=coeffs_Y,
-        #     idx_interp=idx_interp,
-        #     t_interp=t_interp,
-        # )
         phi_ref = get_heading(coeffs_X, coeffs_Y, idx_interp, t_interp)
-        kappa_ref = get_curvature(coeffs_X, coeffs_Y, idx_interp, t_interp)
-        # v_ref = np.minimum(v_max, np.sqrt(a_lat_max / np.abs(kappa_ref)))
 
         lap_length = s_ref[-1] + np.hypot(X_ref[-1] - X_ref[0], Y_ref[-1] - Y_ref[0])
         s_diff = np.append(
@@ -1682,7 +1674,6 @@ def closed_loop(
     # setup main simulation variables
     Nsim = int(Tsim / dt) + 1
     x_current = np.array([0.0, 0.0, np.pi / 2, 0.0])
-    # x_current = np.array([0.5, 0.0, np.pi / 2 + 0.5, 0.0])
     s_guess = 0.0
     all_x_ref = []
     all_x_pred = []
@@ -1699,14 +1690,6 @@ def closed_loop(
 
     # create motion planner
     motion_planner = MotionPlanner(center_line, v_ref=v_ref)
-    # motion_planner.plot_motion_plan(
-    #     center_line,
-    #     blue_cones,
-    #     yellow_cones,
-    #     big_orange_cones,
-    #     small_orange_cones,
-    #     "Motion Planner",
-    # )
     progress_bar = trange(Nsim)
     for i in progress_bar:
         X = x_current[0]

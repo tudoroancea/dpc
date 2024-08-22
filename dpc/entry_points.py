@@ -1,12 +1,44 @@
-from icecream import ic
 from argparse import ArgumentParser
+
+import matplotlib.pyplot as plt
+import numpy as np
+from icecream import ic
+
 from dpc.core import (
-    closed_loop,
-    visualize_trajectories_from_file,
-    NMPCController,
     DPCController,
+    MotionPlanner,
+    NMPCController,
     VizMode,
+    closed_loop,
+    load_center_line,
+    load_cones,
+    visualize_trajectories_from_file,
 )
+
+
+def plot_track():
+    parser = ArgumentParser(prog="plot_track")
+    parser.add_argument("--track", default="fsds_competition_1")
+    args = parser.parse_args()
+
+    # import track data
+    center_line, _ = load_center_line(f"data/tracks/{args.track}/center_line.csv")
+    blue_cones, yellow_cones, big_orange_cones, small_orange_cones, _, _ = load_cones(
+        f"data/tracks/{args.track}/cones.csv"
+    )
+
+    # create motion planner
+    motion_planner = MotionPlanner(center_line, v_ref=5.0)
+    motion_planner.plot_motion_plan(
+        center_line,
+        blue_cones,
+        yellow_cones,
+        big_orange_cones,
+        small_orange_cones,
+        "Motion Planner",
+    )
+    ic()
+    plt.show()
 
 
 def closed_loop_nmpc():
