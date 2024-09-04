@@ -3,7 +3,7 @@ name = "dpc"
 version = "0.1.0"
 description = "making Differentiable Predictive Control work on cars"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = "==3.12"
 authors = [{ name = "Tudor Oancea", email = "oancea.tudor@icloud.com" }]
 dependencies = [
     # misc utilities
@@ -14,7 +14,8 @@ dependencies = [
     "numpy>=2.0.0",
     "scipy>=1.14.1",
     "qpsolvers[osqp]>=4.3.3",
-    "casadi>=3.6.6",
+    "casadi>=3.6.6; sys_platform == 'linux'",
+    "casadi>=3.6.7; sys_platform == 'darwin'",
     # "casadi>=3.6.7", # until 3.6.7 is realeased, install nightly wheels from https://github.com/casadi/casadi/releases/tag/nightly-main
     # deep learning
     "torch>=2.4.0",
@@ -43,3 +44,4 @@ venvPath = "."
 
 [tool.uv.sources]
 strongpods = { git = "https://github.com/tudoroancea/strongpods.git" }
+casadi = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_x86_64.whl" }
