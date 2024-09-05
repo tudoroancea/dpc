@@ -751,7 +751,7 @@ class DPCController(Controller):
             1 - index_choice
         )
         # plot the distribution of each value as a separate histogram
-        fig, axs = plt.subplots(2, 2)
+        _, axs = plt.subplots(2, 2)
         for i, ax in enumerate(axs.flat):
             ax.hist(gen[:, i], bins=30)
             ax.set_title(["curvature", "lateral", "heading", "velocity"][i])
@@ -1519,7 +1519,7 @@ class MotionPlanner:
         return sa + lamda * (sb - sa)
 
     def plan(
-        self, X: float, Y: float, phi: float, v: float, s_guess: float
+        self, X: float, Y: float, phi: float, s_guess: float
     ) -> tuple[float, FloatArray, FloatArray, FloatArray, FloatArray]:
         # project current position on the reference trajectory and extract reference time of passage
         s0 = self.project(X, Y, s_guess)
@@ -1683,7 +1683,7 @@ def closed_loop(
 
     # import track data
     center_line, _ = load_center_line(f"data/tracks/{track_name}/center_line.csv")
-    blue_cones, yellow_cones, big_orange_cones, small_orange_cones, _, _ = load_cones(
+    blue_cones, yellow_cones, big_orange_cones, _, _, _ = load_cones(
         f"data/tracks/{track_name}/cones.csv"
     )
 
@@ -1696,9 +1696,7 @@ def closed_loop(
         phi = x_current[2]
         v = x_current[3]
         # construct the reference trajectory
-        s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(
-            X, Y, phi, v, s_guess
-        )
+        s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(X, Y, phi, s_guess)
         # add data to arrays
         all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
         # call controller
