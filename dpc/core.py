@@ -261,7 +261,6 @@ class NMPCController(Controller):
         solver: Literal["fatrop", "ipopt"] = "ipopt",
         jit: bool = False,
         codegen: bool = False,
-        **kwargs,
     ):
         super().__init__(cost_weights)
 

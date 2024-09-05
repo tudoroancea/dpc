@@ -176,7 +176,7 @@ requires-dist = [
     { name = "pyqt5", marker = "sys_platform == 'linux'", specifier = ">=5.15" },
     { name = "qpsolvers", extras = ["osqp"], specifier = ">=4.3.3" },
     { name = "scipy", specifier = ">=1.14.1" },
-    { name = "strongpods", git = "https://github.com/tudoroancea/strongpods.git" },
+    { name = "strongpods", specifier = ">=2.1.0" },
     { name = "torch", specifier = ">=2.4.0" },
     { name = "tqdm", specifier = ">=4.66.5" },
 ]
@@ -852,10 +852,14 @@ wheels = [
 
 [[package]]
 name = "strongpods"
-version = "2.0.1"
-source = { git = "https://github.com/tudoroancea/strongpods.git#4dfb06cf4629d9bdace47e0bd3d3466d1cb82edc" }
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/9c/6d5215c56f633fcb41b98db4ea9c7f8642e81c22936fbc60e053a5d15f90/strongpods-2.1.0.tar.gz", hash = "sha256:ac94cb2aac4b0be0142cdae6c2cfee5f8ab65a44bd4cf0a679265df1ca46359a", size = 21871 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/db/c4900ed761d7c0dc5b2e8165412651d5bb03398592336be7b2b22a640c7f/strongpods-2.1.0-py3-none-any.whl", hash = "sha256:e8f890175cb5bb0a15b2bb4fc50f3f1bf79e2f5e4e235f5a9a55463b9c1e3553", size = 7046 },
 ]
 
 [[package]]
