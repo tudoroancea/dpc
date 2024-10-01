@@ -119,7 +119,7 @@ def get_discrete_dynamics_casadi() -> ca.Function:
     k3 = f(x + dt / 2 * k2, u)
     k4 = f(x + dt * k3, u)
     return ca.Function(
-        "discrete_dynamics", [x, u], [x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)]
+        "discrete_dynamics", [x, u], [ca.cse(x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4))]
     )
 
 
@@ -291,10 +291,7 @@ class NMPCController(Controller):
             if i > 0:
                 cp = ca.cos(phi_ref[i])
                 sp = ca.sin(phi_ref[i])
-                X = x[i][0]
-                Y = x[i][1]
-                phi = x[i][2]
-                v = x[i][3]
+                X, Y, phi, v = ca.vertsplit(x[i], 1)
                 e_lon = cp * (X - X_ref[i]) + sp * (Y - Y_ref[i])
                 e_lat = -sp * (X - X_ref[i]) + cp * (Y - Y_ref[i])
                 cost_function += (
@@ -304,8 +301,7 @@ class NMPCController(Controller):
                     + self.cost_weights.q_v * (v - v_ref[i]) ** 2
                 )
             # stage control costs
-            T = u[i][0]
-            delta = u[i][1]
+            T, delta = ca.vertsplit(u[i], 1)
             T_ref = (
                 ca.tanh(10 * v_ref[i])
                 * (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2)
@@ -319,10 +315,7 @@ class NMPCController(Controller):
         # terminal state costs
         cp = ca.cos(phi_ref[Nf])
         sp = ca.sin(phi_ref[Nf])
-        X = x[Nf][0]
-        Y = x[Nf][1]
-        phi = x[Nf][2]
-        v = x[Nf][3]
+        X, Y, phi, v = ca.vertsplit(x[Nf], 1)
         e_lon = cp * (X - X_ref[Nf]) + sp * (Y - Y_ref[Nf])
         e_lat = -sp * (X - X_ref[Nf]) + cp * (Y - Y_ref[Nf])
         cost_function += (
@@ -331,6 +324,7 @@ class NMPCController(Controller):
             + self.cost_weights.q_phi_f * (phi - phi_ref[Nf]) ** 2
             + self.cost_weights.q_v_f * (v - v_ref[Nf]) ** 2
         )
+        cost_function = ca.cse(cost_function)
         opti.minimize(cost_function)
 
         # formulate OCP constraints
@@ -341,9 +335,9 @@ class NMPCController(Controller):
             # initial state constraint
             if i == 0:
                 opti.subject_to(x[i] == x0)
-            # NOTE: here we can't use opti.bounded() for some reason (fatrop doesn't detect the constraints)
-            opti.subject_to(-T_max <= (u[i][0] <= T_max))
-            opti.subject_to(-delta_max <= (u[i][1] <= delta_max))
+            # control input constraints
+            opti.bounded(-T_max, u[i][0], T_max)
+            opti.bounded(-delta_max, u[i][1], delta_max)
 
         # choose solver options
         if solver == "ipopt":
@@ -364,7 +358,10 @@ class NMPCController(Controller):
         options.update(
             {
                 "jit": jit,
-                "jit_options": {"flags": ["-O3 -march=native"], "verbose": False},
+                "jit_options": {
+                    "flags": ["-O3 -march=native"],
+                    "verbose": False,
+                },
             }
         )
 
@@ -405,7 +402,7 @@ class NMPCController(Controller):
         self.cost_function = cost_function
 
         # call once the solver with dummy data so that the code generation takes place
-        # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger codegen)
+        # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger jit compilation)
         if jit:
             print("Generating code... ", end="", flush=True)
             start = perf_counter()
