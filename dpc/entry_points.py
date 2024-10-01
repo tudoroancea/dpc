@@ -62,7 +62,7 @@ def codegen_nmpc():
     parser = ArgumentParser(prog="codegen_nmpc")
     parser.add_argument("--solver", default="ipopt")
     args = parser.parse_args()
-    NMPCController(solver=args.solver, codegen=True)
+    NMPCController(solver=args.solver).codegen()
 
 
 def create_dpc_dataset():

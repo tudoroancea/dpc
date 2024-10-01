@@ -239,6 +239,8 @@ class Controller(ABC):
 
 
 class NMPCController(Controller):
+    # solver
+    solver: str
     # system dynamics
     discrete_dynamics: ca.Function
     # optimization problem
@@ -258,11 +260,18 @@ class NMPCController(Controller):
     def __init__(
         self,
         cost_weights: CostWeights = CostWeights(),
-        solver: Literal["fatrop", "ipopt"] = "ipopt",
+        solver: Literal["fatrop", "ipopt"] = "fatrop",
         jit: bool = False,
-        codegen: bool = False,
     ):
+        """
+        Args:
+        - cost_weights: CostWeights object containing the weights of the cost functions
+        - solver: solver to use, either "fatrop" or "ipopt"
+        - jit: whether to use the jit compiler or not
+        - codegen: whether to generate C code for the solver (to link against other programs)
+        """
         super().__init__(cost_weights)
+        self.solver = solver
 
         # instantiate casadi function for discrete dynamics
         self.discrete_dynamics = get_discrete_dynamics_casadi()
@@ -339,7 +348,7 @@ class NMPCController(Controller):
             opti.bounded(-T_max, u[i][0], T_max)
             opti.bounded(-delta_max, u[i][1], delta_max)
 
-        # choose solver options
+        # choose solver options and set the solver
         if solver == "ipopt":
             options = {
                 "print_time": 0,
@@ -364,31 +373,7 @@ class NMPCController(Controller):
                 },
             }
         )
-
-        # assemble solver
         opti.solver(solver, options)
-
-        if codegen:
-            states = ca.horzcat(*x)
-            controls = ca.horzcat(*u)
-            solver_function = opti.to_function(
-                f"nmpc_solver_{solver}",
-                [x0, X_ref, Y_ref, phi_ref, v_ref, states, controls],
-                [states, controls, cost_function],
-                ["x0", "X_ref", "Y_ref", "phi_ref", "v_ref", "x_guess", "u_guess"],
-                ["x_opt", "u_opt", "cost_function"],
-            )
-            ic(solver_function)
-            solver_function.generate(
-                f"nmpc_solver_{solver}",
-                {
-                    "with_mem": True,
-                    "with_header": True,
-                    "verbose": True,
-                    "indent": 4,
-                    "main": True,
-                },
-            )
 
         # save variables as attributes
         self.opti = opti
@@ -404,6 +389,7 @@ class NMPCController(Controller):
         # call once the solver with dummy data so that the code generation takes place
         # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger jit compilation)
         if jit:
+            breakpoint()
             print("Generating code... ", end="", flush=True)
             start = perf_counter()
             self.control(
@@ -417,6 +403,36 @@ class NMPCController(Controller):
                 np.zeros(Nf + 1),
             )
             print(f"done in {perf_counter() - start:.2f} s")
+
+    def codegen(self):
+        states = ca.horzcat(*self.x)
+        controls = ca.horzcat(*self.u)
+        solver_function = self.opti.to_function(
+            f"nmpc_solver_{self.solver}",
+            [
+                self.x0,
+                self.X_ref,
+                self.Y_ref,
+                self.phi_ref,
+                self.v_ref,
+                states,
+                controls,
+            ],
+            [states, controls, self.cost_function],
+            ["x0", "X_ref", "Y_ref", "phi_ref", "v_ref", "x_guess", "u_guess"],
+            ["x_opt", "u_opt", "cost_function"],
+        )
+        ic(solver_function)
+        solver_function.generate(
+            f"nmpc_solver_{self.solver}",
+            {
+                "with_mem": True,
+                "with_header": True,
+                "verbose": True,
+                "indent": 4,
+                "main": True,
+            },
+        )
 
     def update_params(
         self,
