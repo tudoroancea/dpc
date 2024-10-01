@@ -383,7 +383,7 @@ class NMPCController(Controller):
             )
             ic(solver_function)
             solver_function.generate(
-                f"nmpc_solver_{solver}.c",
+                f"nmpc_solver_{solver}",
                 {
                     "with_mem": True,
                     "with_header": True,
@@ -479,9 +479,11 @@ class NMPCController(Controller):
         # solve the optimization problem
         start = perf_counter()
         try:
+            # call the solver with solve_limited() to avoid throwing a C++
+            # exception that we can't catch in python
             sol = self.opti.solve_limited()
         except RuntimeError as err:
-            with open("bruh.json", "w") as f:
+            with open("nmpc_inputs.json", "w") as f:
                 json.dump(
                     {
                         "X": X,

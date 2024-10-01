@@ -37,7 +37,6 @@ def plot_track():
         small_orange_cones,
         "Motion Planner",
     )
-    ic()
     plt.show()
 
 

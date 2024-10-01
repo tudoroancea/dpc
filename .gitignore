@@ -1,8 +1,6 @@
 !data/tracks
 data/dpc/finetuning/*csv
 data/dpc/pretraining/*csv
-c_generated_code
-acados_ocp.json
 *.png
 *.npz
 *.h
@@ -23,3 +21,4 @@ __pycache__
 *.pyc
 .ruff_cache
 .venv
+*.json
