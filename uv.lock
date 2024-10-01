@@ -97,54 +97,30 @@ wheels = [
 
 [[package]]
 name = "casadi"
-version = "3.6.6.dev0+main"
-source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-macosx_11_0_arm64.whl" }
-resolution-markers = [
-    "platform_machine == 'arm64' and sys_platform == 'darwin'",
-]
+version = "3.6.7"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "numpy", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
+    { name = "numpy" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/e0/8d2c6a350101b6f73548a1ceba4b93b60e436060ed647e5fb5d5e0b17fed/casadi-3.6.7.tar.gz", hash = "sha256:21cde87288afebb32a2a035bf6b6a91a025e24ee14aba7a0ae5515707b9887c1", size = 5132668 }
 wheels = [
-    { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:bd0229eee209733bbec28d4520e2392f14e0050536efef239d15664928dafc17" },
+    { url = "https://files.pythonhosted.org/packages/f8/ec/a872e058a1f3ef766b4cf514be7a4bcb543fa9bf7e97cc27303fee21b368/casadi-3.6.7-cp27-none-macosx_10_13_x86_64.macosx_10_13_intel.whl", hash = "sha256:65976cabb6f8b5eecd72b346edbc4211cf0c8743c1ab9109ddc0eb0407da5a7e", size = 44946511 },
+    { url = "https://files.pythonhosted.org/packages/44/77/ca3dd37f92cadda99d2018b996546c548b641e068cd1566cc10527909170/casadi-3.6.7-cp27-none-manylinux1_i686.whl", hash = "sha256:05ef1a87ac6e173cba3762f0ad0ba50c02154317a1135317a23c446a149a2e12", size = 48369489 },
+    { url = "https://files.pythonhosted.org/packages/30/12/5743fceaf79bad73ceebdf10f4ea5c4f3abad778af5d8e132f0c44ba8d35/casadi-3.6.7-cp27-none-manylinux2010_x86_64.whl", hash = "sha256:8cefef3e30c36e89df94b94ba19eb3588b960ff713d7631233d3402d34544f47", size = 54350031 },
+    { url = "https://files.pythonhosted.org/packages/7e/fb/fbf0fd2b5c28cb36612ceb240c7e76c51a9367b73d727cfac5b303a79145/casadi-3.6.7-cp27-none-win_amd64.whl", hash = "sha256:3a51b7731126ca1767accbe6747df7ba0087fc32537ab7e5843db88ab42454e3", size = 44660650 },
+    { url = "https://files.pythonhosted.org/packages/73/96/1f8323b62c663898179dd0c74edbe09ae94d674eed4ad5eb95c40d3bb49d/casadi-3.6.7-cp312-none-macosx_10_13_x86_64.macosx_10_13_intel.whl", hash = "sha256:f780e496157ab1caeb6fe19079e4508c2d7a9f5489b298e04c40438a3ba0caf4", size = 44955332 },
+    { url = "https://files.pythonhosted.org/packages/9c/49/8a1ff97a94e219142d36c7c0b70d6ad7c79c4927efa53d5a8be29a51a32b/casadi-3.6.7-cp312-none-macosx_11_0_arm64.whl", hash = "sha256:c02a304f5e8b147bca343e84b4de39629e2b761901c1fe99ecffa66c99875b80", size = 40416554 },
+    { url = "https://files.pythonhosted.org/packages/5c/dd/242806ccb9d36f6c006d43ad844c752566ed8cc0c0f026a86b3c8c7c2ecb/casadi-3.6.7-cp312-none-manylinux2014_aarch64.whl", hash = "sha256:290e92a7e2f4cecffc229dc196a85855e7dbedf6929eed1850b27e4ad8ad67f0", size = 43904952 },
+    { url = "https://files.pythonhosted.org/packages/4e/4c/d6547e51d066df4225a11770360ebcf38532d218fafc07824683ce5253fa/casadi-3.6.7-cp312-none-manylinux2014_i686.whl", hash = "sha256:c7c1502a042efb321da1556e94cc8ef6a035785b9ebcb5ddd4676b32e58d09f8", size = 70246100 },
+    { url = "https://files.pythonhosted.org/packages/b5/21/d4bc8c6a492fadecd68128de97595aa8038a6f31fb57159d52a8013e2f06/casadi-3.6.7-cp312-none-manylinux2014_x86_64.whl", hash = "sha256:16042ef095117704312be53389a0f22ab7a0968131db2bf785663d8003957a95", size = 73408033 },
+    { url = "https://files.pythonhosted.org/packages/d1/7c/ef71d5988bf4588d298a3b5cbf6ae50621dad4e291f471b5c653ef95b4b8/casadi-3.6.7-cp312-none-win_amd64.whl", hash = "sha256:7f65e7444ddb15f521e0dc5d61b2557054e264de1dea8d9990235336d3e80247", size = 44690057 },
+    { url = "https://files.pythonhosted.org/packages/14/da/e93f10d8c75f7886bf607f7d84b1fabc819c15eb71f63f2423c514259d05/casadi-3.6.7-cp313-none-macosx_10_13_x86_64.macosx_10_13_intel.whl", hash = "sha256:6b6240fcd207aa154867a09bb830d3067d0e55808fbaef8c4c0e24c55b6905b4", size = 44955450 },
+    { url = "https://files.pythonhosted.org/packages/58/3d/c7a13503ba6684cda80d88aafd8d666294dcde5bfc30b22d8dcbb0edf51d/casadi-3.6.7-cp313-none-macosx_11_0_arm64.whl", hash = "sha256:cacf78a5e3c5590bf281a1606a213ac5d6d9e0be71986449b7e523044abb2ea0", size = 40416107 },
+    { url = "https://files.pythonhosted.org/packages/bb/58/7e53d59b51bdfb6b124ee2bffa9cb62a1f144969c5e00a7dd42da0bb479d/casadi-3.6.7-cp313-none-manylinux2014_aarch64.whl", hash = "sha256:f3c2d013bcb969b8a9b2e8aa9b6fcfaf9990d29eef496d1eee7d44a889b0f9b6", size = 43904963 },
+    { url = "https://files.pythonhosted.org/packages/f7/1f/673aa199ae270c7ce6418ad0d690709124a0dc7e52ca463596e97e2ef25e/casadi-3.6.7-cp313-none-manylinux2014_i686.whl", hash = "sha256:acddbf6bb05e357c898bcb3253ed106c3be6a0007957ec0231f84cae873a3def", size = 70246112 },
+    { url = "https://files.pythonhosted.org/packages/ab/9e/803ed4be23663a73637ecfe2e6effa40bd89018b8003b1d30c1d771bb75b/casadi-3.6.7-cp313-none-manylinux2014_x86_64.whl", hash = "sha256:bb9f3c2e9ab4a1fb28a7ad7e5012e133720656b606b8f560bc1bc55a8154e2d9", size = 73408028 },
+    { url = "https://files.pythonhosted.org/packages/36/fe/40be0cd7205893bc1637d11752aacb8736d9aed01120453579f70b6a5611/casadi-3.6.7-cp313-none-win_amd64.whl", hash = "sha256:fa8da902f2e29893e71394c6bf1d3ccb6df52d063d06982a3e8b4ec5118f1827", size = 44690043 },
 ]
-
-[package.metadata]
-requires-dist = [{ name = "numpy" }]
-
-[[package]]
-name = "casadi"
-version = "3.6.6.dev0+main"
-source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_aarch64.whl" }
-resolution-markers = [
-    "platform_machine == 'aarch64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "numpy", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_aarch64.whl", hash = "sha256:ba97c9192761a858f94cbf6d08aeae598ab80838351fb24ef9b2513b9f73d064" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "numpy" }]
-
-[[package]]
-name = "casadi"
-version = "3.6.6.dev0+main"
-source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_x86_64.whl" }
-resolution-markers = [
-    "platform_machine == 'x86_64' and sys_platform == 'linux'",
-]
-dependencies = [
-    { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
-]
-wheels = [
-    { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_x86_64.whl", hash = "sha256:f58597e739d9f09100fa673c029bf3589720c67a557d3d8aacbbb1b41a5d15f1" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "numpy" }]
 
 [[package]]
 name = "colorama"
@@ -208,9 +184,7 @@ name = "dpc"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "casadi", version = "3.6.6.dev0+main", source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-macosx_11_0_arm64.whl" }, marker = "platform_machine == 'arm64' and sys_platform == 'darwin'" },
-    { name = "casadi", version = "3.6.6.dev0+main", source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_aarch64.whl" }, marker = "platform_machine == 'aarch64' and sys_platform == 'linux'" },
-    { name = "casadi", version = "3.6.6.dev0+main", source = { url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "casadi" },
     { name = "icecream" },
     { name = "lightning" },
     { name = "matplotlib" },
@@ -225,9 +199,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "casadi", marker = "platform_machine == 'aarch64' and sys_platform == 'linux'", url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_aarch64.whl" },
-    { name = "casadi", marker = "platform_machine == 'arm64' and sys_platform == 'darwin'", url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-macosx_11_0_arm64.whl" },
-    { name = "casadi", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'", url = "https://github.com/casadi/casadi/releases/download/nightly-main/casadi-3.6.6.dev+main-cp312-none-manylinux2014_x86_64.whl" },
+    { name = "casadi", specifier = ">=3.6.7" },
     { name = "icecream", specifier = ">=2.1.3" },
     { name = "lightning", specifier = ">=2.4.0" },
     { name = "matplotlib", specifier = ">=3.9.2" },
@@ -952,7 +924,7 @@ dependencies = [
     { name = "nvidia-nvtx-cu12", marker = "platform_machine == 'x86_64' and platform_system == 'Linux'" },
     { name = "setuptools" },
     { name = "sympy" },
-    { name = "triton", marker = "python_full_version < '3.13' and platform_machine == 'x86_64' and platform_system == 'Linux'" },
+    { name = "triton", marker = "python_full_version < '3.13' and platform_machine == 'x86_64' and platform_system == 'Linux' and python_full_version >= '3.12' and python_full_version < '4'" },
     { name = "typing-extensions" },
 ]
 wheels = [

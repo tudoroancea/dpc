@@ -44,8 +44,8 @@ def plot_track():
 def closed_loop_nmpc():
     parser = ArgumentParser(prog="closed_loop_nmpc")
     parser.add_argument("--solver", default="ipopt")
-    parser.add_argument("--jit", default=False)
-    parser.add_argument("--viz", default=True)
+    parser.add_argument("--jit", action="store_true")
+    parser.add_argument("--viz", action="store_true")
     parser.add_argument("--track", default="fsds_competition_1")
     args = parser.parse_args()
     closed_loop(
@@ -57,6 +57,13 @@ def closed_loop_nmpc():
         visualize_trajectories_from_file(
             data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
         )
+
+
+def codegen_nmpc():
+    parser = ArgumentParser(prog="codegen_nmpc")
+    parser.add_argument("--solver", default="ipopt")
+    args = parser.parse_args()
+    NMPCController(solver=args.solver, codegen=True)
 
 
 def create_dpc_dataset():
