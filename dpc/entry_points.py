@@ -46,11 +46,13 @@ def closed_loop_nmpc():
     parser.add_argument("--jit", action="store_true")
     parser.add_argument("--viz", action="store_true")
     parser.add_argument("--track", default="fsds_competition_1")
+    parser.add_argument("--vref", type=float, default=5.0)
     args = parser.parse_args()
     closed_loop(
         controller=NMPCController(solver=args.solver, jit=args.jit),
         track_name=args.track,
         data_file="closed_loop_data.npz",
+        v_ref=args.vref,
     )
     if args.viz:
         visualize_trajectories_from_file(

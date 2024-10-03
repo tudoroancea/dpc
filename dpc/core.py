@@ -294,21 +294,8 @@ class NMPCController(Controller):
 
         # construct cost function
         cost_function = 0.0
+        all_e_lat = []
         for i in range(Nf):
-            # stage state costs (since the initial state is fixed, we can't optimize
-            # the cost at stage 0 and can ignore it in the cost function)
-            if i > 0:
-                cp = ca.cos(phi_ref[i])
-                sp = ca.sin(phi_ref[i])
-                X, Y, phi, v = ca.vertsplit(x[i], 1)
-                e_lon = cp * (X - X_ref[i]) + sp * (Y - Y_ref[i])
-                e_lat = -sp * (X - X_ref[i]) + cp * (Y - Y_ref[i])
-                cost_function += (
-                    self.cost_weights.q_lon * e_lon**2
-                    + self.cost_weights.q_lat * e_lat**2
-                    + self.cost_weights.q_phi * (phi - phi_ref[i]) ** 2
-                    + self.cost_weights.q_v * (v - v_ref[i]) ** 2
-                )
             # stage control costs
             T, delta = ca.vertsplit(u[i], 1)
             T_ref = (
@@ -320,6 +307,21 @@ class NMPCController(Controller):
                 self.cost_weights.r_T * (T - T_ref) ** 2
                 + self.cost_weights.r_delta * delta**2
             )
+            # stage state costs (since the initial state is fixed, we can't optimize
+            # the cost at stage 0 and can ignore it in the cost function)
+            if i > 0:
+                cp = ca.cos(phi_ref[i])
+                sp = ca.sin(phi_ref[i])
+                X, Y, phi, v = ca.vertsplit(x[i], 1)
+                e_lon = cp * (X - X_ref[i]) + sp * (Y - Y_ref[i])
+                e_lat = -sp * (X - X_ref[i]) + cp * (Y - Y_ref[i])
+                all_e_lat.append(e_lat)
+                cost_function += (
+                    self.cost_weights.q_lon * e_lon**2
+                    + self.cost_weights.q_lat * e_lat**2
+                    + self.cost_weights.q_phi * (phi - phi_ref[i]) ** 2
+                    + self.cost_weights.q_v * (v - v_ref[i]) ** 2
+                )
 
         # terminal state costs
         cp = ca.cos(phi_ref[Nf])
@@ -327,6 +329,7 @@ class NMPCController(Controller):
         X, Y, phi, v = ca.vertsplit(x[Nf], 1)
         e_lon = cp * (X - X_ref[Nf]) + sp * (Y - Y_ref[Nf])
         e_lat = -sp * (X - X_ref[Nf]) + cp * (Y - Y_ref[Nf])
+        all_e_lat.append(e_lat)
         cost_function += (
             self.cost_weights.q_lon_f * e_lon**2
             + self.cost_weights.q_lat_f * e_lat**2
@@ -345,8 +348,17 @@ class NMPCController(Controller):
             if i == 0:
                 opti.subject_to(x[i] == x0)
             # control input constraints
-            opti.bounded(-T_max, u[i][0], T_max)
-            opti.bounded(-delta_max, u[i][1], delta_max)
+            opti.subject_to((-T_max <= u[i][0]) <= T_max)
+            opti.subject_to((-delta_max <= u[i][1]) <= delta_max)
+
+            if i > 0:
+                # track constraints
+                opti.subject_to((-1.25 <= all_e_lat[i - 1]) <= 1.25)
+                # velocity constraints
+                opti.subject_to(0.0 <= x[i][3])
+        # terminal constraints
+        opti.subject_to((-1.25 <= all_e_lat[Nf - 1]) <= 1.25)
+        opti.subject_to(0.0 <= x[Nf][3])
 
         # choose solver options and set the solver
         if solver == "ipopt":
@@ -356,10 +368,9 @@ class NMPCController(Controller):
                 "ipopt": {"sb": "yes", "print_level": 0, "max_resto_iter": 0},
             }
         elif solver == "fatrop":
-            # probably there is a problem with the fact that we specify the
             options = {
                 "print_time": 0,
-                "debug": False,
+                "debug": True,
                 "expand": True,
                 "structure_detection": "auto",
                 "fatrop": {"print_level": 0},
@@ -389,7 +400,6 @@ class NMPCController(Controller):
         # call once the solver with dummy data so that the code generation takes place
         # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger jit compilation)
         if jit:
-            breakpoint()
             print("Generating code... ", end="", flush=True)
             start = perf_counter()
             self.control(
@@ -510,8 +520,6 @@ class NMPCController(Controller):
                     },
                     f,
                 )
-            print(err)
-            breakpoint()
             raise err
 
         stop = perf_counter()
@@ -527,7 +535,6 @@ class NMPCController(Controller):
             and stats["return_status"] != "Maximum_Iterations_Exceeded"
         ):
             ic(stats)
-            breakpoint()
             raise RuntimeError(stats["return_status"])
 
         return (
@@ -1896,7 +1903,7 @@ def visualize_trajectories(
     blue = "#1f77b4"
     red = "#ff5733"
     yellow = "#d5c904"
-    # purple = "#7c00c6"
+    purple = "#7c00c6"
 
     # initialize axes and lines
     # TODO: add shared x axis for 1d subplots
@@ -1915,6 +1922,21 @@ def visualize_trajectories(
                 big_orange_cones[:, 0], big_orange_cones[:, 1], s=28, c=orange
             )
             axes[subplot_name].plot(center_line[:, 0], center_line[:, 1], c="k")
+            axes[subplot_name].scatter(
+                x_pred[0, 0, 0], x_pred[0, 0, 1], c=purple, marker="x"
+            )
+            # plot initial heading with an arrow
+            axes[subplot_name].arrow(
+                x_pred[0, 0, 0],
+                x_pred[0, 0, 1],
+                np.cos(x_pred[0, 0, 2]) * np.sqrt(2),
+                np.sin(x_pred[0, 0, 2]) * np.sqrt(2),
+                head_width=0.1,
+                head_length=0.1,
+                fc=purple,
+                ec=purple,
+            )
+
             # plot data that will be update using the slider and store the lines
             lines[subplot_name] = {
                 "past": axes[subplot_name].plot(
