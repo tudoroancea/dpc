@@ -3,6 +3,7 @@ import json
 import os
 from abc import ABC, abstractmethod
 from copy import copy
+from dataclasses import dataclass
 from enum import Enum
 from multiprocessing import Pool, cpu_count
 from time import perf_counter
@@ -41,6 +42,8 @@ FloatArray = npt.NDArray[np.float64]
 # car mass and geometry
 m = 230.0  # mass
 wheelbase = 1.5706  # distance between the two axles
+car_length = 2.0
+car_width = 1.0
 # drivetrain parameters (simplified)
 C_m0 = 4.950
 C_r0 = 297.030
@@ -54,6 +57,7 @@ Nf = 40  # horizon size
 nx = 4  # state dimension
 nu = 2  # control dimension
 dt = 1 / 20  # sampling time
+delta_s_f = 20.0  # size in meters of the preview center line
 
 ################################################################################
 # utils
@@ -63,6 +67,11 @@ dt = 1 / 20  # sampling time
 def teds_projection(x: FloatArray, a: float) -> FloatArray:
     """Projection of x onto the interval [a, a + 2*pi)"""
     return np.mod(x - a, 2 * np.pi) + a
+
+
+def wrap_to_pi(x: FloatArray) -> FloatArray:
+    """Projection of x onto the interval [-pi, pi)"""
+    return teds_projection(x, -np.pi)
 
 
 def unwrap_to_pi(x: FloatArray) -> FloatArray:
@@ -123,6 +132,48 @@ def get_discrete_dynamics_casadi() -> ca.Function:
     )
 
 
+def get_continuous_dynamics_casadi_2(kappa: ca.Function, *args) -> ca.Function:
+    # state and control variables
+    delta_s = ca.MX.sym("delta_s")
+    n = ca.MX.sym("n")
+    psi = ca.MX.sym("psi")
+    v = ca.MX.sym("v")
+    T = ca.MX.sym("T")
+    delta = ca.MX.sym("delta")
+    x = ca.vertcat(delta_s, n, psi, v)
+    u = ca.vertcat(T, delta)
+
+    # auxiliary variables
+    beta = 0.5 * delta  # slip angle
+    v_x = v * ca.cos(beta)  # longitudinal velocity
+    l_R = 0.5 * wheelbase
+
+    delta_s_dot = v * ca.cos(psi + beta) / (1 + n * kappa(delta_s, *args))
+
+    # assemble bicycle dynamics
+    return ca.Function(
+        "continuous_dynamics",
+        [x, u] + list(args),
+        [
+            ca.vertcat(
+                delta_s_dot,
+                v * ca.sin(psi + beta),
+                v * ca.sin(beta) / l_R + kappa(delta_s, *args) * delta_s_dot,
+                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x))
+                / m,
+            )
+        ],
+    )
+
+
+def rk4(f, x, *args):
+    k1 = f(x, *args)
+    k2 = f(x + dt / 2 * k1, *args)
+    k3 = f(x + dt / 2 * k2, *args)
+    k4 = f(x + dt * k3, *args)
+    return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+
+
 def continuous_dynamics_pytorch(x: torch.Tensor, u: torch.Tensor) -> torch.Tensor:
     """
     :param x: shape (nbatch, nx)
@@ -181,25 +232,22 @@ def unrolled_discrete_dynamics_pytorch(
 ################################################################################
 
 
-@PODS
+@dataclass
 class ControllerStats:
     runtime: float
     cost: float
     num_iters: int = 0
 
 
-@PODS
+@dataclass
 class CostWeights:
-    q_lon: float = 10.0
-    q_lat: float = 20.0
-    q_phi: float = 50.0
-    q_v: float = 20.0
-    r_T: float = 1e-3
-    r_delta: float = 2.0
-    q_lon_f: float = 1000.0
-    q_lat_f: float = 1000.0
-    q_phi_f: float = 500.0
-    q_v_f: float = 1000.0
+    q_delta_s_dot: float = 500.0
+    q_psi: float = 1.0
+    q_n: float = 20.0
+    q_psi_f: float = 1.0
+    q_n_f: float = 20.0
+    r_T: float = 0.0
+    r_delta: float = 50.0
 
 
 class Controller(ABC):
@@ -238,7 +286,7 @@ class Controller(ABC):
         pass
 
 
-class NMPCController(Controller):
+class NMPCController:
     # solver
     solver: str
     # system dynamics
@@ -295,6 +343,8 @@ class NMPCController(Controller):
         # construct cost function
         cost_function = 0.0
         all_e_lat = []
+        all_left_e_lat = []
+        all_right_e_lat = []
         for i in range(Nf):
             # stage control costs
             T, delta = ca.vertsplit(u[i], 1)
@@ -316,8 +366,19 @@ class NMPCController(Controller):
                 e_lon = cp * (X - X_ref[i]) + sp * (Y - Y_ref[i])
                 e_lat = -sp * (X - X_ref[i]) + cp * (Y - Y_ref[i])
                 all_e_lat.append(e_lat)
+                all_left_e_lat.append(
+                    e_lat
+                    + 0.5 * car_width * ca.cos(phi - phi_ref[i])
+                    + 0.5 * car_length * ca.sin(phi - phi_ref[i])
+                )
+                all_right_e_lat.append(
+                    e_lat
+                    - 0.5 * car_width * ca.cos(phi - phi_ref[i])
+                    + 0.5 * car_length * ca.sin(phi - phi_ref[i])
+                )
                 cost_function += (
                     self.cost_weights.q_lon * e_lon**2
+                    # -self.cost_weights.q_lon * e_lon
                     + self.cost_weights.q_lat * e_lat**2
                     + self.cost_weights.q_phi * (phi - phi_ref[i]) ** 2
                     + self.cost_weights.q_v * (v - v_ref[i]) ** 2
@@ -330,8 +391,19 @@ class NMPCController(Controller):
         e_lon = cp * (X - X_ref[Nf]) + sp * (Y - Y_ref[Nf])
         e_lat = -sp * (X - X_ref[Nf]) + cp * (Y - Y_ref[Nf])
         all_e_lat.append(e_lat)
+        all_left_e_lat.append(
+            e_lat
+            + 0.5 * car_width * ca.cos(phi - phi_ref[Nf])
+            + 0.5 * car_length * ca.sin(phi - phi_ref[Nf])
+        )
+        all_right_e_lat.append(
+            e_lat
+            - 0.5 * car_width * ca.cos(phi - phi_ref[Nf])
+            + 0.5 * car_length * ca.sin(phi - phi_ref[Nf])
+        )
         cost_function += (
             self.cost_weights.q_lon_f * e_lon**2
+            # -self.cost_weights.q_lon_f * e_lon
             + self.cost_weights.q_lat_f * e_lat**2
             + self.cost_weights.q_phi_f * (phi - phi_ref[Nf]) ** 2
             + self.cost_weights.q_v_f * (v - v_ref[Nf]) ** 2
@@ -353,12 +425,14 @@ class NMPCController(Controller):
 
             if i > 0:
                 # track constraints
-                opti.subject_to((-1.25 <= all_e_lat[i - 1]) <= 1.25)
+                opti.subject_to((-1.25 <= all_left_e_lat[i - 1]) <= 1.25)
+                opti.subject_to((-1.25 <= all_right_e_lat[i - 1]) <= 1.25)
                 # velocity constraints
-                opti.subject_to(0.0 <= x[i][3])
+                opti.subject_to((0.0 <= x[i][3]) <= 5.0)
         # terminal constraints
-        opti.subject_to((-1.25 <= all_e_lat[Nf - 1]) <= 1.25)
-        opti.subject_to(0.0 <= x[Nf][3])
+        opti.subject_to((-1.25 <= all_left_e_lat[Nf - 1]) <= 1.25)
+        opti.subject_to((-1.25 <= all_right_e_lat[Nf - 1]) <= 1.25)
+        opti.subject_to((0.0 <= x[Nf][3]) <= 5.0)
 
         # choose solver options and set the solver
         if solver == "ipopt":
@@ -536,6 +610,331 @@ class NMPCController(Controller):
         ):
             ic(stats)
             raise RuntimeError(stats["return_status"])
+
+        return (
+            last_prediction_x,
+            last_prediction_u,
+            ControllerStats(runtime=runtime, cost=cost, num_iters=stats["iter_count"]),
+        )
+
+
+class NMPCController2:
+    # solver
+    solver: str
+    # system dynamics
+    # discrete_dynamics: ca.Function
+    # optimization problem
+    opti: ca.Opti
+    # parameters
+    x0: ca.MX
+    delta_s_cen: ca.MX
+    kappa_cen: ca.MX
+    # optimization variables
+    x: list[ca.MX]
+    u: list[ca.MX]
+    # cost function
+    cost_function: ca.MX
+
+    def __init__(
+        self,
+        cost_weights: CostWeights = CostWeights(),
+        solver: Literal["fatrop", "ipopt"] = "fatrop",
+        jit: bool = False,
+    ):
+        """
+        Args:
+        - cost_weights: CostWeights object containing the weights of the cost functions
+        - solver: solver to use, either "fatrop" or "ipopt"
+        - jit: whether to use the jit compiler or not
+        - codegen: whether to generate C code for the solver (to link against other programs)
+        """
+        # super().__init__(cost_weights)
+        self.cost_weights = cost_weights
+        self.solver = solver
+
+        # declare optimization variables
+        opti = ca.Opti()
+        x = []
+        u = []
+        for i in range(Nf):
+            x.append(opti.variable(nx))
+            u.append(opti.variable(nu))
+        x.append(opti.variable(nx))
+
+        # declare parameters
+        x0 = opti.parameter(nx)
+        delta_s_cen = opti.parameter(100)
+        kappa_cen = opti.parameter(100)
+
+        kappa_fun = ca.interpolant("kappa_fun", "linear", [100], 1)
+        # delta_s = ca.MX.sym("delta_s")
+        # kappa_fun_with_values = ca.Function( "kappa", [delta_s], [kappa_fun(delta_s, delta_s_cen, kappa_cen)] )
+
+        # instantiate casadi function for discrete dynamics
+        # self.discrete_dynamics = get_discrete_dynamics_casadi_2(kappa_fun_with_values)
+        f_cont = get_continuous_dynamics_casadi_2(kappa_fun, delta_s_cen, kappa_cen)
+        self.f_cont = f_cont
+
+        # construct cost function
+        cost_function = 0.0
+        # all_e_lat = []
+        # all_left_e_lat = []
+        # all_right_e_lat = []
+        for i in range(Nf):
+            # stage control costs
+            T, delta = ca.vertsplit(u[i], 1)
+            # T_ref = (
+            #     ca.tanh(10 * v_ref[i])
+            #     * (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2)
+            #     / C_m0
+            # )
+            cost_function += (
+                self.cost_weights.r_T * T**2 + self.cost_weights.r_delta * delta**2
+            )
+            # stage state costs (since the initial state is fixed, we can't optimize
+            # the cost at stage 0 and can ignore it in the cost function)
+            if i > 0:
+                delta_s_dot = f_cont(x[i], u[i], delta_s_cen, kappa_cen)[0]
+                n, psi = x[i][1], x[i][2]
+                cost_function += (
+                    -self.cost_weights.q_delta_s_dot * delta_s_dot
+                    + self.cost_weights.q_n * n**2
+                    + self.cost_weights.q_psi * psi**2
+                )
+
+        # terminal state costs
+        cost_function += (
+            +self.cost_weights.q_n_f * x[Nf][1] ** 2
+            + self.cost_weights.q_psi_f * x[Nf][2] ** 2
+        )
+        cost_function = ca.cse(cost_function)
+        opti.minimize(cost_function)
+
+        # formulate OCP constraints
+        # NOTE: the order in which the constraints are declared is important for fatrop
+        for i in range(Nf):
+            # equality constraints coming from the dynamics
+            opti.subject_to(x[i + 1] == rk4(f_cont, x[i], u[i], delta_s_cen, kappa_cen))
+            # initial state constraint
+            if i == 0:
+                opti.subject_to(x[i] == x0)
+            # control input constraints
+            opti.subject_to((-T_max <= u[i][0]) <= T_max)
+            opti.subject_to((-delta_max <= u[i][1]) <= delta_max)
+
+            if i > 0:
+                # track constraints
+                opti.subject_to(
+                    (
+                        -1.75
+                        <= x[i][1]
+                        - 0.5 * car_width * ca.cos(x[i][2])
+                        + 0.5 * car_length * ca.sin(x[i][2])
+                    )
+                    <= 1.75
+                )
+                opti.subject_to(
+                    (
+                        -1.75
+                        <= x[i][1]
+                        + 0.5 * car_width * ca.cos(x[i][2])
+                        + 0.5 * car_length * ca.sin(x[i][2])
+                    )
+                    <= 1.75
+                )
+                # velocity constraints
+                opti.subject_to(0.0 <= x[i][3])
+        # terminal constraints
+        opti.subject_to(
+            (
+                -1.75
+                <= x[Nf][1]
+                - 0.5 * car_width * ca.cos(x[Nf][2])
+                + 0.5 * car_length * ca.sin(x[Nf][2])
+            )
+            <= 1.75
+        )
+        opti.subject_to(
+            (
+                -1.75
+                <= x[Nf][1]
+                + 0.5 * car_width * ca.cos(x[Nf][2])
+                + 0.5 * car_length * ca.sin(x[Nf][2])
+            )
+            <= 1.75
+        )
+        opti.subject_to(0.0 <= x[Nf][3])
+
+        # choose solver options and set the solver
+        if solver == "ipopt":
+            options = {
+                "print_time": 0,
+                "expand": True,
+                "ipopt": {"sb": "yes", "print_level": 0, "max_resto_iter": 0},
+            }
+        elif solver == "fatrop":
+            options = {
+                "print_time": 0,
+                "debug": True,
+                "expand": True,
+                "structure_detection": "auto",
+                "fatrop": {"print_level": 0},
+            }
+        options.update(
+            {
+                "jit": jit,
+                "jit_options": {
+                    "flags": ["-O3 -march=native"],
+                    "verbose": False,
+                },
+            }
+        )
+        opti.solver(solver, options)
+
+        # save variables as attributes
+        self.opti = opti
+        self.x0 = x0
+        self.delta_s_cen = delta_s_cen
+        self.kappa_cen = kappa_cen
+        self.x = x
+        self.u = u
+        self.cost_function = cost_function
+
+        # call once the solver with dummy data so that the code generation takes place
+        # NOTE: this is necessary because Opti seems to lazily create an nlpsol instance (which will trigger jit compilation)
+        if jit:
+            print("Generating code... ", end="", flush=True)
+            start = perf_counter()
+            self.control(
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+                np.zeros(Nf + 1),
+            )
+            print(f"done in {perf_counter() - start:.2f} s")
+
+    def codegen(self):
+        states = ca.horzcat(*self.x)
+        controls = ca.horzcat(*self.u)
+        solver_function = self.opti.to_function(
+            f"nmpc_solver_{self.solver}",
+            [
+                self.x0,
+                self.X_ref,
+                self.Y_ref,
+                self.phi_ref,
+                self.v_ref,
+                states,
+                controls,
+            ],
+            [states, controls, self.cost_function],
+            ["x0", "X_ref", "Y_ref", "phi_ref", "v_ref", "x_guess", "u_guess"],
+            ["x_opt", "u_opt", "cost_function"],
+        )
+        ic(solver_function)
+        solver_function.generate(
+            f"nmpc_solver_{self.solver}",
+            {
+                "with_mem": True,
+                "with_header": True,
+                "verbose": True,
+                "indent": 4,
+                "main": True,
+            },
+        )
+
+    def update_params(
+        self,
+        n: float,
+        psi: float,
+        v: float,
+        delta_s_cen: FloatArray,
+        kappa_cen: FloatArray,
+    ):
+        self.opti.set_value(self.x0, np.array([0.0, n, psi, v]))
+        self.opti.set_value(self.delta_s_cen, delta_s_cen)
+        self.opti.set_value(self.kappa_cen, kappa_cen)
+
+    # def set_initial_guess(
+    #     self,
+    #     X_ref: FloatArray,
+    #     Y_ref: FloatArray,
+    #     phi_ref: FloatArray,
+    #     v_ref: FloatArray,
+    # ):
+    #     T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref * v_ref) / C_m0
+    #     for i in range(Nf):
+    #         self.opti.set_initial(
+    #             self.x[i], np.array([X_ref[i], Y_ref[i], phi_ref[i], v_ref[i]])
+    #         )
+    #         self.opti.set_initial(self.u[i], np.array([T_ref[i], 0.0]))
+    #     self.opti.set_initial(
+    #         self.x[Nf], np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]])
+    #     )
+
+    def extract_solution(self, sol: ca.OptiSol) -> tuple[float, FloatArray, FloatArray]:
+        cost = sol.value(self.cost_function)
+        last_prediction_x = np.array([sol.value(self.x[i]) for i in range(Nf + 1)])
+        last_prediction_u = np.array([sol.value(self.u[i]) for i in range(Nf)])
+        return cost, last_prediction_x, last_prediction_u
+
+    def control(
+        self,
+        n: float,
+        psi: float,
+        v: float,
+        delta_s_cen: FloatArray,
+        kappa_cen: FloatArray,
+    ) -> tuple[FloatArray, FloatArray, ControllerStats]:
+        # setup problem
+        self.update_params(n, psi, v, delta_s_cen, kappa_cen)
+        # self.set_initial_guess(X_ref, Y_ref, phi_ref, v_ref)
+
+        # solve the optimization problem
+        start = perf_counter()
+        try:
+            # call the solver with solve_limited() to avoid throwing a C++
+            # exception that we can't catch in python
+            sol = self.opti.solve_limited()
+        except RuntimeError as err:
+            # with open("nmpc_inputs.json", "w") as f:
+            #     json.dump(
+            #         {
+            #             # "delta_s": delta_s,
+            #             "v": v,
+            #             "X_ref": X_ref.tolist(),
+            #             "Y_ref": Y_ref.tolist(),
+            #             "phi_ref": phi_ref.tolist(),
+            #             "v_ref": v_ref.tolist(),
+            #         },
+            #         f,
+            #     )
+            raise err
+
+        stop = perf_counter()
+        runtime = stop - start
+
+        # extract solution
+        cost, last_prediction_x, last_prediction_u = self.extract_solution(sol)
+
+        # check exit flag
+        stats = self.opti.stats()
+        if (
+            not stats["success"]
+            and stats["return_status"] != "Maximum_Iterations_Exceeded"
+        ):
+            ic(stats)
+            raise RuntimeError(stats["return_status"])
+
+        # ic(
+        #     self.f_cont(
+        #         last_prediction_x[0], last_prediction_u[0], delta_s_cen, kappa_cen
+        #     )[0]
+        # )
 
         return (
             last_prediction_x,
@@ -1222,9 +1621,9 @@ def fit_spline(
                        (each row correspond to a_i, b_i, c_i, d_i coefficients of the i-th
                        spline portion defined by a_i + b_i * t + ...)
     """
-    assert (
-        len(path.shape) == 2 and path.shape[1] == 2
-    ), f"path must have shape (N,2) but has shape {path.shape}"
+    assert len(path.shape) == 2 and path.shape[1] == 2, (
+        f"path must have shape (N,2) but has shape {path.shape}"
+    )
 
     # precompute all the QP data
     N = path.shape[0]
@@ -1299,15 +1698,15 @@ def fit_spline(
 
 
 def check_spline_coeffs_dims(coeffs_X: FloatArray, coeffs_Y: FloatArray):
-    assert (
-        len(coeffs_X.shape) == 2 and coeffs_X.shape[1] == 4
-    ), f"coeffs_X must have shape (N,4) but has shape {coeffs_X.shape}"
-    assert (
-        len(coeffs_Y.shape) == 2 and coeffs_Y.shape[1] == 4
-    ), f"coeffs_Y must have shape (N,4) but has shape {coeffs_Y.shape}"
-    assert (
-        coeffs_X.shape[0] == coeffs_Y.shape[0]
-    ), f"coeffs_X and coeffs_Y must have the same length but have lengths {coeffs_X.shape[0]} and {coeffs_Y.shape[0]}"
+    assert len(coeffs_X.shape) == 2 and coeffs_X.shape[1] == 4, (
+        f"coeffs_X must have shape (N,4) but has shape {coeffs_X.shape}"
+    )
+    assert len(coeffs_Y.shape) == 2 and coeffs_Y.shape[1] == 4, (
+        f"coeffs_Y must have shape (N,4) but has shape {coeffs_Y.shape}"
+    )
+    assert coeffs_X.shape[0] == coeffs_Y.shape[0], (
+        f"coeffs_X and coeffs_Y must have the same length but have lengths {coeffs_X.shape[0]} and {coeffs_Y.shape[0]}"
+    )
 
 
 def compute_spline_interval_lengths(
@@ -1480,6 +1879,7 @@ class MotionPlanner:
             n_samples=n_samples,
         )
         phi_ref = get_heading(coeffs_X, coeffs_Y, idx_interp, t_interp)
+        kappa_ref = get_curvature(coeffs_X, coeffs_Y, idx_interp, t_interp)
 
         lap_length = s_ref[-1] + np.hypot(X_ref[-1] - X_ref[0], Y_ref[-1] - Y_ref[0])
         s_diff = np.append(
@@ -1497,6 +1897,7 @@ class MotionPlanner:
         self.X_ref = np.concatenate((X_ref, X_ref, X_ref))
         self.Y_ref = np.concatenate((Y_ref, Y_ref, Y_ref))
         self.phi_ref = unwrap_to_pi(np.concatenate((phi_ref, phi_ref, phi_ref)))
+        self.kappa_ref = np.concatenate((kappa_ref, kappa_ref, kappa_ref))
         self.v_ref = v_ref
 
     def project(
@@ -1556,6 +1957,15 @@ class MotionPlanner:
         # post-process the reference heading to make sure it is in the range [phi - pi, phi + pi))
         phi_ref = teds_projection(phi_ref, phi - np.pi)
         return s0, X_ref, Y_ref, phi_ref, v_ref
+
+    def plan2(
+        self, X: float, Y: float, phi: float, s_guess: float
+    ) -> tuple[float, FloatArray, FloatArray]:
+        # project current position on the reference trajectory and extract reference time of passage
+        s0 = self.project(X, Y, s_guess)
+        delta_s = np.linspace(0.0, delta_s_f, 100)
+        kappa = np.interp(s0 + delta_s, self.s_ref, self.kappa_ref)
+        return s0, delta_s, kappa
 
     def plot_motion_plan(
         self,
@@ -1677,7 +2087,7 @@ def plot_cones(
 
 
 def closed_loop(
-    controller: Controller,
+    controller: NMPCController2,
     Tsim: float = 70.0,
     v_ref: float = 5.0,
     track_name: str = "fsds_competition_1",
@@ -1718,17 +2128,35 @@ def closed_loop(
         phi = x_current[2]
         v = x_current[3]
         # construct the reference trajectory
-        s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(X, Y, phi, s_guess)
+        # s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(X, Y, phi, s_guess)
+        s_guess, delta_s, kappa = motion_planner.plan2(X, Y, phi, s_guess)
+        X_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.X_ref)
+        Y_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.Y_ref)
+        phi_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.phi_ref)
+        n = -(X - X_cen) * np.sin(phi_cen) + (Y - Y_cen) * np.cos(phi_cen)
+        psi = wrap_to_pi(phi - phi_cen)
         # add data to arrays
-        all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
+        # all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
         # call controller
         try:
-            x_pred, u_pred, stats = controller.control(
-                X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
-            )
+            # x_pred, u_pred, stats = controller.control(
+            #     X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
+            # )
+            breakpoint()
+            x_pred, u_pred, stats = controller.control(n, psi, v, delta_s, kappa)
         except RuntimeError as e:
             print(f"Error in iteration {i}: {e}")
             break
+        s_ref = s_guess + x_pred[:, 0]
+        X_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.X_ref)
+        Y_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.Y_ref)
+        phi_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.phi_ref)
+        all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, x_pred[:, 3])))
+        X_pred = X_ref - x_pred[:, 1] * np.sin(phi_ref)
+        Y_pred = Y_ref + x_pred[:, 1] * np.cos(phi_ref)
+        phi_pred = x_pred[:, 2] + phi_ref
+        v_pred = x_pred[:, 3]
+
         u_current = u_pred[0]
         progress_bar.set_description(
             f"Runtime: {1000 * stats.runtime:.2f} ms, cost: {stats.cost:.2f}"
@@ -1736,7 +2164,7 @@ def closed_loop(
         # add data to arrays
         all_runtimes.append(stats.runtime)
         all_costs.append(stats.cost)
-        all_x_pred.append(x_pred)
+        all_x_pred.append(np.column_stack((X_pred, Y_pred, phi_pred, v_pred)))
         all_u_pred.append(u_pred)
         # simulate next state
         x_current = discrete_dynamics(x_current, u_current).full().ravel()

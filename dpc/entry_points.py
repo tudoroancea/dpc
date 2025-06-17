@@ -8,6 +8,7 @@ from dpc.core import (
     DPCController,
     MotionPlanner,
     NMPCController,
+    NMPCController2,
     VizMode,
     closed_loop,
     load_center_line,
@@ -49,7 +50,8 @@ def closed_loop_nmpc():
     parser.add_argument("--vref", type=float, default=5.0)
     args = parser.parse_args()
     closed_loop(
-        controller=NMPCController(solver=args.solver, jit=args.jit),
+        # controller=NMPCController(solver=args.solver, jit=args.jit),
+        controller=NMPCController2(solver=args.solver, jit=args.jit),
         track_name=args.track,
         data_file="closed_loop_data.npz",
         v_ref=args.vref,
