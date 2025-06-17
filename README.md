@@ -6,23 +6,8 @@ We provide below a setup example using [`uv`](https://github.com/astral-sh/uv), 
 ```bash
 git clone https://github.com/tudoroancea/dpc
 cd dpc
-uv venv
-. .venv/bin/activate
-uv pip install -e '.[dev]'
+uv sync
 ```
-
-If you are on linux, also do the following:
-
-```bash
-uv pip install -e '.[linux]' 
-```
-
-Finally, install the nightly wheels of `casadi` from https://github.com/tudoroancea/casadi/releases/tag/nightly-main.
-Once version 3.6.7 is released, we should be able to include it directly in the project dependencies in `pyproject.toml`.
-
-### casadi setup:
-
-To be able to use [fatrop](https://github.com/meco-group/fatrop), install the nightly wheels from https://github.com/casadi/casadi/releases/tag/nightly-plugin_madnlp2.
 
 ## discoveries
 
