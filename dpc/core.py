@@ -26,7 +26,6 @@ from qpsolvers import solve_qp
 from scipy.sparse import csc_array
 from scipy.sparse import eye as speye
 from scipy.sparse import kron as spkron
-from strongpods import PODS
 from torch.utils.data import DataLoader, Dataset, random_split
 from tqdm import trange
 
@@ -53,11 +52,21 @@ C_r2 = 0.6784
 T_max = 500.0
 delta_max = 0.5
 # general OCP parameters
-Nf = 40  # horizon size
+Nf = 20  # horizon size
 nx = 4  # state dimension
 nu = 2  # control dimension
 dt = 1 / 20  # sampling time
 delta_s_f = 20.0  # size in meters of the preview center line
+
+q_delta_s = 0.0
+q_delta_s_dot: float = 0.0
+q_psi: float = 0.0
+q_n: float = 0.0
+q_v = 0.0
+r_T: float = 0.0
+r_delta: float = 0.0
+r_ddelta = 0.0
+r_dT = 0.0
 
 ################################################################################
 # utils
@@ -159,8 +168,8 @@ def get_continuous_dynamics_casadi_2(kappa: ca.Function, *args) -> ca.Function:
                 delta_s_dot,
                 v * ca.sin(psi + beta),
                 v * ca.sin(beta) / l_R + kappa(delta_s, *args) * delta_s_dot,
-                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x))
-                / m,
+                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2)) / m,
+                # (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x)) / m,
             )
         ],
     )
@@ -241,13 +250,13 @@ class ControllerStats:
 
 @dataclass
 class CostWeights:
-    q_delta_s_dot: float = 500.0
-    q_psi: float = 1.0
-    q_n: float = 20.0
-    q_psi_f: float = 1.0
-    q_n_f: float = 20.0
-    r_T: float = 0.0
-    r_delta: float = 50.0
+    q_delta_s_dot: float = 700.0
+    q_psi: float = 10.0
+    q_n: float = 1.0
+    q_psi_f: float = 10.0
+    q_n_f: float = 1.0
+    r_T: float = 1.0
+    r_delta: float = 100.0
 
 
 class Controller(ABC):
@@ -637,8 +646,8 @@ class NMPCController2:
 
     def __init__(
         self,
-        cost_weights: CostWeights = CostWeights(),
-        solver: Literal["fatrop", "ipopt"] = "fatrop",
+        # cost_weights: CostWeights = CostWeights(),
+        solver: Literal["fatrop", "ipopt"] = "ipopt",
         jit: bool = False,
     ):
         """
@@ -649,7 +658,7 @@ class NMPCController2:
         - codegen: whether to generate C code for the solver (to link against other programs)
         """
         # super().__init__(cost_weights)
-        self.cost_weights = cost_weights
+        # self.cost_weights = cost_weights
         self.solver = solver
 
         # declare optimization variables
@@ -667,8 +676,6 @@ class NMPCController2:
         kappa_cen = opti.parameter(100)
 
         kappa_fun = ca.interpolant("kappa_fun", "linear", [100], 1)
-        # delta_s = ca.MX.sym("delta_s")
-        # kappa_fun_with_values = ca.Function( "kappa", [delta_s], [kappa_fun(delta_s, delta_s_cen, kappa_cen)] )
 
         # instantiate casadi function for discrete dynamics
         # self.discrete_dynamics = get_discrete_dynamics_casadi_2(kappa_fun_with_values)
@@ -677,36 +684,34 @@ class NMPCController2:
 
         # construct cost function
         cost_function = 0.0
-        # all_e_lat = []
-        # all_left_e_lat = []
-        # all_right_e_lat = []
         for i in range(Nf):
             # stage control costs
             T, delta = ca.vertsplit(u[i], 1)
-            # T_ref = (
-            #     ca.tanh(10 * v_ref[i])
-            #     * (C_r0 + C_r1 * v_ref[i] + C_r2 * v_ref[i] ** 2)
-            #     / C_m0
-            # )
-            cost_function += (
-                self.cost_weights.r_T * T**2 + self.cost_weights.r_delta * delta**2
-            )
+            # v_ref = 10.0
+            # T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref**2) / C_m0
+            cost_function += r_T * T**2
+            cost_function += r_delta * delta * delta
+            if i < Nf - 1:
+                dT = u[i + 1][0] - u[i][0]
+                ddelta = u[i + 1][1] - u[i][1]
+                cost_function += r_dT * dT * dT + r_ddelta * ddelta * ddelta
+
             # stage state costs (since the initial state is fixed, we can't optimize
             # the cost at stage 0 and can ignore it in the cost function)
             if i > 0:
+                delta_s, n, psi, v = ca.vertsplit(x[i], 1)
                 delta_s_dot = f_cont(x[i], u[i], delta_s_cen, kappa_cen)[0]
-                n, psi = x[i][1], x[i][2]
                 cost_function += (
-                    -self.cost_weights.q_delta_s_dot * delta_s_dot
-                    + self.cost_weights.q_n * n**2
-                    + self.cost_weights.q_psi * psi**2
+                    -q_delta_s * delta_s
+                    - q_delta_s_dot * delta_s_dot
+                    + q_n * n**2
+                    + q_psi * psi**2
+                    - q_v * v
                 )
 
         # terminal state costs
-        cost_function += (
-            +self.cost_weights.q_n_f * x[Nf][1] ** 2
-            + self.cost_weights.q_psi_f * x[Nf][2] ** 2
-        )
+        delta_s, n, psi, v = ca.vertsplit(x[Nf], 1)
+        cost_function += -q_delta_s * delta_s + q_n * n**2 + q_psi * psi**2 - q_v * v
         cost_function = ca.cse(cost_function)
         opti.minimize(cost_function)
 
@@ -789,6 +794,7 @@ class NMPCController2:
                 },
             }
         )
+        ic(solver)
         opti.solver(solver, options)
 
         # save variables as attributes
@@ -859,22 +865,29 @@ class NMPCController2:
         self.opti.set_value(self.delta_s_cen, delta_s_cen)
         self.opti.set_value(self.kappa_cen, kappa_cen)
 
-    # def set_initial_guess(
-    #     self,
-    #     X_ref: FloatArray,
-    #     Y_ref: FloatArray,
-    #     phi_ref: FloatArray,
-    #     v_ref: FloatArray,
-    # ):
-    #     T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref * v_ref) / C_m0
-    #     for i in range(Nf):
-    #         self.opti.set_initial(
-    #             self.x[i], np.array([X_ref[i], Y_ref[i], phi_ref[i], v_ref[i]])
-    #         )
-    #         self.opti.set_initial(self.u[i], np.array([T_ref[i], 0.0]))
-    #     self.opti.set_initial(
-    #         self.x[Nf], np.array([X_ref[Nf], Y_ref[Nf], phi_ref[Nf], v_ref[Nf]])
-    #     )
+    def set_initial_guess(self):
+        for i in range(Nf):
+            self.opti.set_initial(
+                self.x[i],
+                np.zeros(nx),
+                # self.last_prediction_x[0]
+                # if hasattr(self, "last_prediction_x")
+                # else np.zeros(nx),
+            )
+            self.opti.set_initial(
+                self.u[i],
+                np.zeros(nu),
+                # self.last_prediction_u[0]
+                # if hasattr(self, "last_prediction_u")
+                # else np.zeros(2),
+            )
+        self.opti.set_initial(
+            self.x[Nf],
+            np.zeros(nx),
+            # self.last_prediction_x[Nf]
+            # if hasattr(self, "last_prediction_x")
+            # else np.zeros(4),
+        )
 
     def extract_solution(self, sol: ca.OptiSol) -> tuple[float, FloatArray, FloatArray]:
         cost = sol.value(self.cost_function)
@@ -892,7 +905,7 @@ class NMPCController2:
     ) -> tuple[FloatArray, FloatArray, ControllerStats]:
         # setup problem
         self.update_params(n, psi, v, delta_s_cen, kappa_cen)
-        # self.set_initial_guess(X_ref, Y_ref, phi_ref, v_ref)
+        self.set_initial_guess()
 
         # solve the optimization problem
         start = perf_counter()
@@ -930,11 +943,10 @@ class NMPCController2:
             ic(stats)
             raise RuntimeError(stats["return_status"])
 
-        # ic(
-        #     self.f_cont(
-        #         last_prediction_x[0], last_prediction_u[0], delta_s_cen, kappa_cen
-        #     )[0]
-        # )
+        ic(last_prediction_x[-1, 0])
+
+        self.last_prediction_x = last_prediction_x
+        self.last_prediction_u = last_prediction_u
 
         return (
             last_prediction_x,
@@ -2142,7 +2154,6 @@ def closed_loop(
             # x_pred, u_pred, stats = controller.control(
             #     X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
             # )
-            breakpoint()
             x_pred, u_pred, stats = controller.control(n, psi, v, delta_s, kappa)
         except RuntimeError as e:
             print(f"Error in iteration {i}: {e}")
@@ -2150,7 +2161,9 @@ def closed_loop(
         s_ref = s_guess + x_pred[:, 0]
         X_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.X_ref)
         Y_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.Y_ref)
-        phi_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.phi_ref)
+        phi_ref = teds_projection(
+            np.interp(s_ref, motion_planner.s_ref, motion_planner.phi_ref), phi - np.pi
+        )
         all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, x_pred[:, 3])))
         X_pred = X_ref - x_pred[:, 1] * np.sin(phi_ref)
         Y_pred = Y_ref + x_pred[:, 1] * np.cos(phi_ref)

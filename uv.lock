@@ -187,7 +187,6 @@ dependencies = [
     { name = "pyqt5", marker = "sys_platform == 'linux'" },
     { name = "qpsolvers", extra = ["osqp"] },
     { name = "scipy" },
-    { name = "strongpods" },
     { name = "torch" },
     { name = "tqdm" },
 ]
@@ -202,7 +201,6 @@ requires-dist = [
     { name = "pyqt5", marker = "sys_platform == 'linux'", specifier = ">=5.15" },
     { name = "qpsolvers", extras = ["osqp"], specifier = ">=4.3.3" },
     { name = "scipy", specifier = ">=1.14.1" },
-    { name = "strongpods", specifier = ">=2.1.0" },
     { name = "torch", specifier = ">=2.4.0" },
     { name = "tqdm", specifier = ">=4.66.5" },
 ]
@@ -1089,18 +1087,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
-]
-
-[[package]]
-name = "strongpods"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/72/9c/6d5215c56f633fcb41b98db4ea9c7f8642e81c22936fbc60e053a5d15f90/strongpods-2.1.0.tar.gz", hash = "sha256:ac94cb2aac4b0be0142cdae6c2cfee5f8ab65a44bd4cf0a679265df1ca46359a", size = 21871, upload-time = "2024-08-28T18:32:28.077Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/db/c4900ed761d7c0dc5b2e8165412651d5bb03398592336be7b2b22a640c7f/strongpods-2.1.0-py3-none-any.whl", hash = "sha256:e8f890175cb5bb0a15b2bb4fc50f3f1bf79e2f5e4e235f5a9a55463b9c1e3553", size = 7046, upload-time = "2024-08-28T18:32:26.293Z" },
 ]
 
 [[package]]
