@@ -4,17 +4,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from icecream import ic
 
-from dpc.core import (
-    DPCController,
-    MotionPlanner,
-    NMPCController,
-    NMPCController2,
-    VizMode,
-    closed_loop,
-    load_center_line,
-    load_cones,
-    visualize_trajectories_from_file,
-)
+import dpc.core as dpc
 
 
 def plot_track():
@@ -23,13 +13,13 @@ def plot_track():
     args = parser.parse_args()
 
     # import track data
-    center_line, _ = load_center_line(f"data/tracks/{args.track}/center_line.csv")
-    blue_cones, yellow_cones, big_orange_cones, small_orange_cones, _, _ = load_cones(
-        f"data/tracks/{args.track}/cones.csv"
+    center_line, _ = dpc.load_center_line(f"data/tracks/{args.track}/center_line.csv")
+    blue_cones, yellow_cones, big_orange_cones, small_orange_cones, _, _ = (
+        dpc.load_cones(f"data/tracks/{args.track}/cones.csv")
     )
 
     # create motion planner
-    motion_planner = MotionPlanner(center_line, v_ref=5.0)
+    motion_planner = dpc.MotionPlanner(center_line, v_ref=5.0)
     motion_planner.plot_motion_plan(
         center_line,
         blue_cones,
@@ -49,15 +39,15 @@ def closed_loop_nmpc():
     parser.add_argument("--track", default="fsds_competition_1")
     parser.add_argument("--vref", type=float, default=5.0)
     args = parser.parse_args()
-    closed_loop(
+    dpc.closed_loop_simulation(
         # controller=NMPCController(solver=args.solver, jit=args.jit),
-        controller=NMPCController2(solver=args.solver, jit=args.jit),
+        controller=dpc.NMPCController(solver=args.solver, jit=args.jit),
         track_name=args.track,
         data_file="closed_loop_data.npz",
         v_ref=args.vref,
     )
     if args.viz:
-        visualize_trajectories_from_file(
+        dpc.closed_loop_visualization_from_file(
             data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
         )
 
@@ -66,17 +56,17 @@ def codegen_nmpc():
     parser = ArgumentParser(prog="codegen_nmpc")
     parser.add_argument("--solver", default="ipopt")
     args = parser.parse_args()
-    NMPCController(solver=args.solver).codegen()
+    dpc.NMPCController(solver=args.solver).codegen()
 
 
 def create_dpc_dataset():
     ic(
-        DPCController.generate_constant_curvature_trajectories(
+        dpc.DPCController.generate_constant_curvature_trajectories(
             curvatures=np.linspace(-0.1, 0.1, 5)
         )
     )
     # create DPC dataset
-    DPCController.create_pretraining_dataset(
+    dpc.DPCController.create_pretraining_dataset(
         "data/dpc/dataset2.csv",
         # n_trajs=31,
         # n_lat=11,
@@ -87,7 +77,7 @@ def create_dpc_dataset():
         n_phi=5,
         n_v=5,
     )
-    DPCController.create_finetuning_dataset(
+    dpc.DPCController.create_finetuning_dataset(
         filename="data/dpc/finetuning/dataset.csv",
         n_samples=40000,
         sigma_curvature=0.05,
@@ -102,7 +92,7 @@ def train_dpc():
         "nhidden": [512] * 2,
         "nonlinearity": "tanh",
     }
-    DPCController.train(
+    dpc.DPCController.train(
         dataset_filename="data/dpc/finetuning/dataset.csv",
         num_epochs=300,
         lr=1e-4,
@@ -119,7 +109,7 @@ def open_loop_dpc():
         "nhidden": [512] * 2,
         "nonlinearity": "tanh",
     }
-    DPCController(
+    dpc.DPCController(
         **net_config,
         weights_file="best.ckpt",
     ).compute_open_loop_predictions(
@@ -127,10 +117,10 @@ def open_loop_dpc():
         data_file="open_loop_data.npz",
         batch_sizes=(None, None),
     )
-    visualize_trajectories_from_file(
+    dpc.closed_loop_visualization_from_file(
         data_file="open_loop_data.npz",
         image_file="open_loop_data.png",
-        viz_mode=VizMode.OPEN_LOOP,
+        viz_mode=dpc.VizMode.OPEN_LOOP,
     )
 
 
@@ -140,9 +130,9 @@ def closed_loop_dpc():
         "nonlinearity": "tanh",
     }
     # run closed loop experiment with DPC controller
-    closed_loop(
+    dpc.closed_loop_simulation(
         Tsim=5.0,
-        controller=DPCController(
+        controller=dpc.DPCController(
             **net_config,
             weights_file="best.ckpt",
             accelerator="cpu",
@@ -150,6 +140,16 @@ def closed_loop_dpc():
         track_name="fsds_competition_1",
         data_file="closed_loop_data.npz",
     )
-    visualize_trajectories_from_file(
+    dpc.closed_loop_visualization_from_file(
         data_file="closed_loop_data.npz", image_file="closed_loop_data.png"
+    )
+
+
+def closed_loop_visualization():
+    parser = ArgumentParser(prog="closed_loop_visualization")
+    parser.add_argument("--data_file", default="closed_loop_data.npz")
+    parser.add_argument("--image_file", default="closed_loop_data.png")
+    args = parser.parse_args()
+    dpc.closed_loop_visualization_from_file(
+        data_file=args.data_file, image_file=args.image_file
     )

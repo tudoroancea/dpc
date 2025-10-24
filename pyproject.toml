@@ -31,6 +31,8 @@ create_dpc_dataset = "dpc.entry_points:create_dpc_dataset"
 train_dpc = "dpc.entry_points:train_dpc"
 open_loop_dpc = "dpc.entry_points:open_loop_dpc"
 closed_loop_dpc = "dpc.entry_points:closed_loop_dpc"
+closed_loop_visualization = "dpc.entry_points:closed_loop_visualization"
+
 
 [build-system]
 requires = ["hatchling"]

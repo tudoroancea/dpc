@@ -43,6 +43,7 @@ m = 230.0  # mass
 wheelbase = 1.5706  # distance between the two axles
 car_length = 2.0
 car_width = 1.0
+v_max = 33.0
 # drivetrain parameters (simplified)
 C_m0 = 4.950
 C_r0 = 297.030
@@ -52,21 +53,21 @@ C_r2 = 0.6784
 T_max = 500.0
 delta_max = 0.5
 # general OCP parameters
-Nf = 20  # horizon size
+Nf = 40  # horizon size
 nx = 4  # state dimension
 nu = 2  # control dimension
 dt = 1 / 20  # sampling time
-delta_s_f = 20.0  # size in meters of the preview center line
+delta_s_f = 40.0  # size in meters of the preview center line
 
 q_delta_s = 0.0
-q_delta_s_dot: float = 0.0
+q_delta_s_dot: float = 0.1
 q_psi: float = 0.0
 q_n: float = 0.0
 q_v = 0.0
 r_T: float = 0.0
-r_delta: float = 0.0
-r_ddelta = 0.0
-r_dT = 0.0
+r_delta: float = 1.0
+r_ddelta = 100.0
+r_dT = 10.0
 
 ################################################################################
 # utils
@@ -168,8 +169,9 @@ def get_continuous_dynamics_casadi_2(kappa: ca.Function, *args) -> ca.Function:
                 delta_s_dot,
                 v * ca.sin(psi + beta),
                 v * ca.sin(beta) / l_R + kappa(delta_s, *args) * delta_s_dot,
-                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2)) / m,
-                # (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x)) / m,
+                # (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2)) / m,
+                (C_m0 * T - (C_r0 + C_r1 * v_x + C_r2 * v_x**2) * ca.tanh(10 * v_x))
+                / m,
             )
         ],
     )
@@ -327,7 +329,7 @@ class NMPCController:
         - jit: whether to use the jit compiler or not
         - codegen: whether to generate C code for the solver (to link against other programs)
         """
-        super().__init__(cost_weights)
+        # super().__init__(cost_weights)
         self.solver = solver
 
         # instantiate casadi function for discrete dynamics
@@ -460,7 +462,7 @@ class NMPCController:
             }
         options.update(
             {
-                "jit": jit,
+                "jit": True,
                 "jit_options": {
                     "flags": ["-O3 -march=native"],
                     "verbose": False,
@@ -687,8 +689,6 @@ class NMPCController2:
         for i in range(Nf):
             # stage control costs
             T, delta = ca.vertsplit(u[i], 1)
-            # v_ref = 10.0
-            # T_ref = (C_r0 + C_r1 * v_ref + C_r2 * v_ref**2) / C_m0
             cost_function += r_T * T**2
             cost_function += r_delta * delta * delta
             if i < Nf - 1:
@@ -716,6 +716,26 @@ class NMPCController2:
         opti.minimize(cost_function)
 
         # formulate OCP constraints
+        delta_s = ca.MX.sym("delta_s")
+        n = ca.MX.sym("n")
+        psi = ca.MX.sym("psi")
+        v = ca.MX.sym("v")
+        T = ca.MX.sym("T")
+        delta = ca.MX.sym("delta")
+        x = ca.vertcat(delta_s, n, psi, v)
+        u = ca.vertcat(T, delta)
+        n_right = ca.Function(
+            "n_right",
+            [x, u],
+            [n - 0.5 * car_width * ca.cos(psi) + 0.5 * car_length * ca.sin(psi)],
+        )
+        n_left = ca.Function(
+            "n_left",
+            [x, u],
+            [n + 0.5 * car_width * ca.cos(psi) + 0.5 * car_length * ca.sin(psi)],
+        )
+        del x, u, delta_s, n, psi, v
+
         # NOTE: the order in which the constraints are declared is important for fatrop
         for i in range(Nf):
             # equality constraints coming from the dynamics
@@ -748,7 +768,7 @@ class NMPCController2:
                     <= 1.75
                 )
                 # velocity constraints
-                opti.subject_to(0.0 <= x[i][3])
+                opti.subject_to((0.0 <= x[i][3]) <= v_max)
         # terminal constraints
         opti.subject_to(
             (
@@ -768,7 +788,7 @@ class NMPCController2:
             )
             <= 1.75
         )
-        opti.subject_to(0.0 <= x[Nf][3])
+        opti.subject_to((0.0 <= x[Nf][3]) <= v_max)
 
         # choose solver options and set the solver
         if solver == "ipopt":
@@ -864,6 +884,20 @@ class NMPCController2:
         self.opti.set_value(self.x0, np.array([0.0, n, psi, v]))
         self.opti.set_value(self.delta_s_cen, delta_s_cen)
         self.opti.set_value(self.kappa_cen, kappa_cen)
+        # x = np.array([0.0, n, psi, v])
+        # xnext = (
+        #     rk4(
+        #         self.f_cont,
+        #         x,
+        #         np.zeros(nu),
+        #         delta_s_cen,
+        #         kappa_cen,
+        #     )
+        #     .toarray()
+        #     .ravel()
+        # )
+        # ic(x, xnext, np.max(np.abs(xnext - x)))
+        # exit(0)
 
     def set_initial_guess(self):
         for i in range(Nf):
@@ -2098,7 +2132,7 @@ def plot_cones(
 ################################################################################
 
 
-def closed_loop(
+def closed_loop_simulation(
     controller: NMPCController2,
     Tsim: float = 70.0,
     v_ref: float = 5.0,
@@ -2217,7 +2251,7 @@ class VizMode(Enum):
     OPEN_LOOP = "open_loop"
 
 
-def visualize_trajectories(
+def closed_loop_visualization(
     x_ref: FloatArray,
     x_pred: FloatArray,
     u_pred: FloatArray,
@@ -2232,8 +2266,10 @@ def visualize_trajectories(
     show: bool = True,
 ):
     """
-    Creates 2 plots:
-    1. a plot to display the evolution of the states and controls over time.
+    Creates multiple plots:
+    1. a box plot of the controller runtime distribution
+    2. a curve plot of the cost function evoluation throughout the closed-loop simulation
+    3. a plot to display the evolution of the states and controls over time.
        It is constituted of the following subplots:
        +-------------------+-------------------+----------------+
        |                   | velocity v (m/s)  | trottle T (N)  |
@@ -2242,7 +2278,6 @@ def visualize_trajectories(
        +-------------------+-------------------+----------------+
        underneath these subplots, a slider will allow to move through the time steps and to visualize the
        references given to the controller, as well as the predictions made by the controller.
-    2. another plot to display the runtimes distribution (scatter plot superposed with a boxplot)
     """
     # plot runtime distribution
     fig = plt.figure()
@@ -2461,7 +2496,7 @@ def visualize_trajectories(
         if "ylabel" in subplot_info:
             axes[subplot_name].set_ylabel(subplot_info["ylabel"])
 
-    fig.tight_layout()
+    # fig.tight_layout()
 
     # save plot to file
     if image_file != "":
@@ -2577,6 +2612,7 @@ def visualize_trajectories(
                 axes[subplot_name].set_ylim(new_ylim)
 
     # create slider
+    fig.subplots_adjust(bottom=0.25)
     slider_ax = fig.add_axes((0.125, 0.02, 0.775, 0.03))
     slider = matplotlib.widgets.Slider(
         ax=slider_ax,
@@ -2588,12 +2624,13 @@ def visualize_trajectories(
         valfmt="%d",
     )
     slider.on_changed(update)
+    fig.tight_layout()
 
     # show plot
     if show:
         plt.show()
 
 
-def visualize_trajectories_from_file(data_file: str, **kwargs):
+def closed_loop_visualization_from_file(data_file: str, **kwargs):
     data = np.load(data_file)
-    visualize_trajectories(**data, **kwargs)
+    closed_loop_visualization(**data, **kwargs)
