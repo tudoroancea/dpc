@@ -53,32 +53,6 @@ r_dT = 10.0
 ################################################################################
 
 
-
-
-
-
-
-
-
-def job(process_df: np.ndarray):
-    reference_controller = NMPCController()
-    result = np.zeros((process_df.shape[0], (1 + nu * Nf)))
-    for i in range(process_df.shape[0]):
-        x_ref = process_df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
-        _, u_ref, stats = reference_controller.control(
-            X=process_df[i, 0],
-            Y=process_df[i, 1],
-            phi=process_df[i, 2],
-            v=process_df[i, 3],
-            X_ref=x_ref[:, 0],
-            Y_ref=x_ref[:, 1],
-            phi_ref=x_ref[:, 2],
-            v_ref=x_ref[:, 3],
-        )
-        result[i, :-1] = u_ref.ravel()
-        result[i, -1] = stats.cost
-    return result
-
 ################################################################################
 # motion planner
 ################################################################################

@@ -199,7 +199,7 @@ class NMPCController(Controller):
       }
     options.update(
       {
-        "jit": True,
+        "jit": jit,
         "jit_options": {
           "flags": ["-O3 -march=native"],
           "verbose": False,

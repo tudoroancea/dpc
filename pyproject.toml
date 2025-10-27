@@ -32,6 +32,7 @@ train_dpc = "dpc.entry_points:train_dpc"
 open_loop_dpc = "dpc.entry_points:open_loop_dpc"
 closed_loop_dpc = "dpc.entry_points:closed_loop_dpc"
 closed_loop_visualization = "dpc.entry_points:closed_loop_visualization"
+debug_fatrop = "dpc.entry_points:debug_fatrop"
 
 
 [build-system]
