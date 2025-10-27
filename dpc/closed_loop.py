@@ -49,6 +49,12 @@ def closed_loop(
     v = x_current[3]
     # construct the reference trajectory
     s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(X, Y, phi, s_guess)
+    # s_guess, delta_s, kappa = motion_planner.plan_curvature(X, Y, phi, s_guess, 40.0)
+    # X_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.X_ref)
+    # Y_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.Y_ref)
+    # phi_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.phi_ref)
+    # n = -(X - X_cen) * np.sin(phi_cen) + (Y - Y_cen) * np.cos(phi_cen)
+    # psi = wrap_to_pi(phi - phi_cen)
     # TODO: add frenet stuff
     # add data to arrays
     all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
