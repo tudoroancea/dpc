@@ -1,87 +1,12 @@
-
-
-
-################################################################################
-# car and problem parameters
-################################################################################
-
-# car mass and geometry
-m = 230.0  # mass
-wheelbase = 1.5706  # distance between the two axles
-car_length = 2.0
-car_width = 1.0
-v_max = 33.0
-# drivetrain parameters (simplified)
-C_m0 = 4.950
-C_r0 = 297.030
-C_r1 = 16.665
-C_r2 = 0.6784
-# actuator limits
-T_max = 500.0
-delta_max = 0.5
-# general OCP parameters
-Nf = 40  # horizon size
-nx = 4  # state dimension
-nu = 2  # control dimension
-dt = 1 / 20  # sampling time
-delta_s_f = 40.0  # size in meters of the preview center line
-
-q_delta_s = 0.0
-q_delta_s_dot: float = 0.1
-q_psi: float = 0.0
-q_n: float = 0.0
-q_v = 0.0
-r_T: float = 0.0
-r_delta: float = 1.0
-r_ddelta = 100.0
-r_dT = 10.0
-
-################################################################################
-# utils
-################################################################################
-
-
-
-
-################################################################################
-# models
-################################################################################
-
-
-################################################################################
-# controllers
-################################################################################
-
-
-
-
-
-
-
-
-
-def job(process_df: np.ndarray):
-    reference_controller = NMPCController()
-    result = np.zeros((process_df.shape[0], (1 + nu * Nf)))
-    for i in range(process_df.shape[0]):
-        x_ref = process_df[i, nx : nx * (Nf + 2)].reshape(Nf + 1, nx)
-        _, u_ref, stats = reference_controller.control(
-            X=process_df[i, 0],
-            Y=process_df[i, 1],
-            phi=process_df[i, 2],
-            v=process_df[i, 3],
-            X_ref=x_ref[:, 0],
-            Y_ref=x_ref[:, 1],
-            phi_ref=x_ref[:, 2],
-            v_ref=x_ref[:, 3],
-        )
-        result[i, :-1] = u_ref.ravel()
-        result[i, -1] = stats.cost
-    return result
-
-################################################################################
-# motion planner
-################################################################################
+import matplotlib.pyplot as plt
+from qpsolvers import solve_qp
+from scipy.sparse import csc_array
+from scipy.sparse import eye as speye
+from scipy.sparse import kron as spkron
+import numpy as np
+import numpy.typing as npt
+from dpc.utils import FloatArray, unwrap_to_pi, teds_projection
+from dpc.constants import dt, Nf
 
 NUMBER_SPLINE_INTERVALS = 500
 
@@ -344,6 +269,35 @@ def get_curvature(
     return kappa
 
 
+def plot_cones(
+    blue_cones,
+    yellow_cones,
+    big_orange_cones,
+    small_orange_cones,
+    origin=np.zeros(2),
+    show=True,
+):
+    plt.scatter(blue_cones[:, 0], blue_cones[:, 1], s=14, c="b", marker="^")
+    plt.scatter(yellow_cones[:, 0], yellow_cones[:, 1], s=14, c="y", marker="^")
+    plt.scatter(
+        big_orange_cones[:, 0], big_orange_cones[:, 1], s=28, c="orange", marker="^"
+    )
+    try:
+        plt.scatter(
+            small_orange_cones[:, 0],
+            small_orange_cones[:, 1],
+            s=7,
+            c="orange",
+            marker="^",
+        )
+    except IndexError:
+        pass
+    plt.scatter(origin[0], origin[1], c="g", marker="x")
+    plt.axis("equal")
+    plt.tight_layout()
+    if show:
+        plt.show()
+
 class MotionPlanner:
     def __init__(
         self,
@@ -360,7 +314,6 @@ class MotionPlanner:
             n_samples=n_samples,
         )
         phi_ref = get_heading(coeffs_X, coeffs_Y, idx_interp, t_interp)
-        kappa_ref = get_curvature(coeffs_X, coeffs_Y, idx_interp, t_interp)
 
         lap_length = s_ref[-1] + np.hypot(X_ref[-1] - X_ref[0], Y_ref[-1] - Y_ref[0])
         s_diff = np.append(
@@ -378,7 +331,6 @@ class MotionPlanner:
         self.X_ref = np.concatenate((X_ref, X_ref, X_ref))
         self.Y_ref = np.concatenate((Y_ref, Y_ref, Y_ref))
         self.phi_ref = unwrap_to_pi(np.concatenate((phi_ref, phi_ref, phi_ref)))
-        self.kappa_ref = np.concatenate((kappa_ref, kappa_ref, kappa_ref))
         self.v_ref = v_ref
 
     def project(
@@ -439,15 +391,6 @@ class MotionPlanner:
         phi_ref = teds_projection(phi_ref, phi - np.pi)
         return s0, X_ref, Y_ref, phi_ref, v_ref
 
-    def plan2(
-        self, X: float, Y: float, phi: float, s_guess: float
-    ) -> tuple[float, FloatArray, FloatArray]:
-        # project current position on the reference trajectory and extract reference time of passage
-        s0 = self.project(X, Y, s_guess)
-        delta_s = np.linspace(0.0, delta_s_f, 100)
-        kappa = np.interp(s0 + delta_s, self.s_ref, self.kappa_ref)
-        return s0, delta_s, kappa
-
     def plot_motion_plan(
         self,
         center_line: FloatArray,
@@ -485,128 +428,3 @@ class MotionPlanner:
         plt.legend()
         plt.title(plot_title + " : reference trajectory")
         plt.tight_layout()
-
-
-################################################################################
-# track data
-################################################################################
-
-
-
-################################################################################
-# closed loop simulation
-################################################################################
-
-
-def closed_loop_simulation(
-    controller: NMPCController2,
-    Tsim: float = 70.0,
-    v_ref: float = 5.0,
-    track_name: str = "fsds_competition_1",
-    data_file: str = "closed_loop_data.npz",
-):
-    """
-    we store all the open loop predictions into big arrays that we dump into npz files
-    we dump x_ref (nx x (Nf+1)), x_pred (nx x (Nf+1)), u_pred (nu x Nf)
-    the current state is always the first element in x_ref
-
-    with this dumped data we can:
-    1. plot it with a slider
-    2. train a new neural control policy using either DPC or imitation learning
-    """
-    # setup main simulation variables
-    Nsim = int(Tsim / dt) + 1
-    x_current = np.array([0.0, 0.0, np.pi / 2, 0.0])
-    s_guess = 0.0
-    all_x_ref = []
-    all_x_pred = []
-    all_u_pred = []
-    all_runtimes = []
-    all_costs = []
-    discrete_dynamics = get_discrete_dynamics_casadi()
-
-    # import track data
-    center_line, _ = load_center_line(f"data/tracks/{track_name}/center_line.csv")
-    blue_cones, yellow_cones, big_orange_cones, _, _, _ = load_cones(
-        f"data/tracks/{track_name}/cones.csv"
-    )
-
-    # create motion planner
-    motion_planner = MotionPlanner(center_line, v_ref=v_ref)
-    progress_bar = trange(Nsim)
-    for i in progress_bar:
-        X = x_current[0]
-        Y = x_current[1]
-        phi = x_current[2]
-        v = x_current[3]
-        # construct the reference trajectory
-        # s_guess, X_ref, Y_ref, phi_ref, v_ref = motion_planner.plan(X, Y, phi, s_guess)
-        s_guess, delta_s, kappa = motion_planner.plan2(X, Y, phi, s_guess)
-        X_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.X_ref)
-        Y_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.Y_ref)
-        phi_cen = np.interp(s_guess, motion_planner.s_ref, motion_planner.phi_ref)
-        n = -(X - X_cen) * np.sin(phi_cen) + (Y - Y_cen) * np.cos(phi_cen)
-        psi = wrap_to_pi(phi - phi_cen)
-        # add data to arrays
-        # all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, v_ref)))
-        # call controller
-        try:
-            # x_pred, u_pred, stats = controller.control(
-            #     X, Y, phi, v, X_ref, Y_ref, phi_ref, v_ref
-            # )
-            x_pred, u_pred, stats = controller.control(n, psi, v, delta_s, kappa)
-        except RuntimeError as e:
-            print(f"Error in iteration {i}: {e}")
-            break
-        s_ref = s_guess + x_pred[:, 0]
-        X_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.X_ref)
-        Y_ref = np.interp(s_ref, motion_planner.s_ref, motion_planner.Y_ref)
-        phi_ref = teds_projection(
-            np.interp(s_ref, motion_planner.s_ref, motion_planner.phi_ref), phi - np.pi
-        )
-        all_x_ref.append(np.column_stack((X_ref, Y_ref, phi_ref, x_pred[:, 3])))
-        X_pred = X_ref - x_pred[:, 1] * np.sin(phi_ref)
-        Y_pred = Y_ref + x_pred[:, 1] * np.cos(phi_ref)
-        phi_pred = x_pred[:, 2] + phi_ref
-        v_pred = x_pred[:, 3]
-
-        u_current = u_pred[0]
-        progress_bar.set_description(
-            f"Runtime: {1000 * stats.runtime:.2f} ms, cost: {stats.cost:.2f}"
-        )
-        # add data to arrays
-        all_runtimes.append(stats.runtime)
-        all_costs.append(stats.cost)
-        all_x_pred.append(np.column_stack((X_pred, Y_pred, phi_pred, v_pred)))
-        all_u_pred.append(u_pred)
-        # simulate next state
-        x_current = discrete_dynamics(x_current, u_current).full().ravel()
-        # check if we have completed a lap
-        if s_guess > motion_planner.lap_length:
-            print(f"Completed a lap in {i} iterations, i.e. {i * dt} s")
-            break
-
-    all_x_ref = np.array(all_x_ref)
-    all_x_pred = np.array(all_x_pred)
-    all_u_pred = np.array(all_u_pred)
-    all_runtimes = np.array(all_runtimes)
-    all_costs = np.array(all_costs)
-
-    # save data to npz file
-    np.savez(
-        data_file,
-        x_ref=all_x_ref,
-        x_pred=all_x_pred,
-        u_pred=all_u_pred,
-        runtimes=all_runtimes,
-        costs=all_costs,
-        center_line=np.column_stack((motion_planner.X_ref, motion_planner.Y_ref)),
-        blue_cones=blue_cones,
-        yellow_cones=yellow_cones,
-        big_orange_cones=big_orange_cones,
-    )
-
-
-################################################################################
-# visualization
-################################################################################
